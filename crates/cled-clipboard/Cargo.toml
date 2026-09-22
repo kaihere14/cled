@@ -1,0 +1,16 @@
+[package]
+name = "cled-clipboard"
+description = "Cross-platform clipboard access and change detection for Cled"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+# Initial backend only; never exposed in the public API. See src/platform/.
+# `image-data` (default) is disabled until image support lands in M2.
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+log = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+env_logger = "0.11"

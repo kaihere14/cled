@@ -16,3 +16,5 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 tauri = { version = "2.11", features = [] }
+cled-clipboard = { path = "../../../crates/cled-clipboard" }
+serde = { version = "1", features = ["derive"] }

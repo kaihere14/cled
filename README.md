@@ -5,8 +5,8 @@
 Cled is an open-source, cross-platform clipboard synchronization app. Copy text or an image on one
 device and paste it on your other devices — Windows, macOS, and Linux (X11 and Wayland).
 
-> **Status: early development.** The project scaffold exists; clipboard functionality is not
-> implemented yet. Nothing here is usable as a product.
+> **Status: early development.** Cled can watch, read, and write the local text clipboard. Sync
+> between devices is not implemented yet. Nothing here is usable as a product.
 
 ## Stack
 
@@ -20,8 +20,8 @@ device and paste it on your other devices — Windows, macOS, and Linux (X11 and
 apps/desktop/          Tauri desktop app
   src/                 React UI
   src-tauri/           Rust entry point and Tauri glue
-crates/                Rust libraries (added as features land)
-docs/                  Architecture and design documents (added as features land)
+crates/cled-clipboard/ Clipboard access and change detection (no Tauri dependency)
+docs/                  Architecture and design documents
 ```
 
 ## Development
@@ -55,6 +55,16 @@ cargo fmt --all     # format Rust
 cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
+
+To exercise the clipboard without the desktop app:
+
+```sh
+cargo run -p cled-clipboard --example clip -- watch          # print clipboard changes
+cargo run -p cled-clipboard --example clip -- read
+cargo run -p cled-clipboard --example clip -- write "hello" --hold 5
+```
+
+See [docs/architecture.md](docs/architecture.md) for how the pieces fit together.
 
 Note: Rust builds of the desktop app expect the frontend to have been built once
 (`pnpm --filter cled-desktop build`), because Tauri embeds `apps/desktop/dist` at compile time.

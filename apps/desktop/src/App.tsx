@@ -1,23 +1,22 @@
-import { getVersion } from "@tauri-apps/api/app";
-import { useEffect, useState } from "react";
+import { CurrentClipboard } from "./components/CurrentClipboard";
+import { History } from "./components/History";
+import { StatusBadge } from "./components/StatusBadge";
+import { WriteForm } from "./components/WriteForm";
+import { useClipboard } from "./lib/useClipboard";
 
 export function App() {
-  const [version, setVersion] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Round-trip through the Tauri bridge to prove the UI <-> Rust wiring works.
-    getVersion()
-      .then(setVersion)
-      .catch(() => setVersion(null));
-  }, []);
+  const { status, current, history, write } = useClipboard();
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-2 bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
-      <h1 className="text-3xl font-semibold tracking-tight">Cled</h1>
-      <p className="text-sm text-neutral-500">Copy once. Paste anywhere.</p>
-      <p className="font-mono text-xs text-neutral-400">
-        {version ? `v${version}` : "Tauri bridge unavailable"}
-      </p>
+    <main className="mx-auto flex min-h-screen max-w-xl flex-col gap-6 px-5 py-6">
+      <header className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold tracking-tight">Cled</h1>
+        <StatusBadge status={status} />
+      </header>
+
+      <CurrentClipboard content={current} />
+      <WriteForm onWrite={write} disabled={status?.state !== "watching"} />
+      <History entries={history} onCopy={write} />
     </main>
   );
 }
