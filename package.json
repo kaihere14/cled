@@ -1,0 +1,14 @@
+{
+  "name": "cled",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "dev": "pnpm --filter cled-desktop tauri dev",
+    "build": "pnpm --filter cled-desktop tauri build",
+    "check": "biome check . && pnpm --filter cled-desktop typecheck",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14"
+  }
+}
