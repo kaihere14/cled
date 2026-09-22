@@ -1,27 +1,61 @@
 //! Tauri glue for the clipboard: commands, the change event, and their payload types.
 //! Keep clipboard logic in `cled-clipboard`; this module only translates.
 
-use cled_clipboard::{ClipboardContent, ClipboardService, DEFAULT_POLL_INTERVAL};
+use cled_clipboard::{
+    ClipboardContent, ClipboardService, DEFAULT_POLL_INTERVAL, SkipReason, Snapshot,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
+
+use crate::preview;
 
 /// Emitted to the UI whenever the system clipboard changes.
 const CHANGED_EVENT: &str = "clipboard:changed";
 
-/// Clipboard content as sent to the UI. Mirrors `ClipboardPayload` in `src/lib/ipc.ts`.
+/// What the UI is told about the clipboard. Mirrors `ClipboardPayload` in `src/lib/ipc.ts`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ClipboardPayload {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Image {
+        width: u32,
+        height: u32,
+        /// `data:image/png` thumbnail; `None` if it couldn't be generated.
+        preview_url: Option<String>,
+    },
+    Skipped {
+        reason: SkippedReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SkippedReason {
+    Sensitive,
+    TooLarge { width: u32, height: u32 },
 }
 
 impl ClipboardPayload {
-    fn from_content(content: ClipboardContent) -> Option<Self> {
-        match content {
-            ClipboardContent::Text(text) => Some(Self::Text { text }),
-            // Content kinds the UI doesn't know yet are not forwarded.
-            _ => None,
-        }
+    /// `None` for an empty clipboard and for anything the UI doesn't know how to show yet.
+    fn from_snapshot(snapshot: Snapshot) -> Option<Self> {
+        Some(match snapshot {
+            Snapshot::Content(ClipboardContent::Text(text)) => Self::Text { text },
+            Snapshot::Content(ClipboardContent::Image(image)) => Self::Image {
+                width: image.width(),
+                height: image.height(),
+                preview_url: preview::data_url(&image),
+            },
+            Snapshot::Skipped(SkipReason::Sensitive) => Self::Skipped {
+                reason: SkippedReason::Sensitive,
+            },
+            Snapshot::Skipped(SkipReason::TooLarge { width, height }) => Self::Skipped {
+                reason: SkippedReason::TooLarge { width, height },
+            },
+            _ => return None,
+        })
     }
 }
 
@@ -31,8 +65,8 @@ pub struct ClipboardState(Result<ClipboardService, String>);
 
 impl ClipboardState {
     pub fn start(app: AppHandle) -> Self {
-        let service = ClipboardService::spawn(DEFAULT_POLL_INTERVAL, move |content| {
-            if let Some(payload) = ClipboardPayload::from_content(content)
+        let service = ClipboardService::spawn(DEFAULT_POLL_INTERVAL, move |snapshot| {
+            if let Some(payload) = ClipboardPayload::from_snapshot(snapshot)
                 && let Err(err) = app.emit(CHANGED_EVENT, payload)
             {
                 eprintln!("failed to emit {CHANGED_EVENT}: {err}");
@@ -71,8 +105,8 @@ pub fn clipboard_status(state: State<'_, ClipboardState>) -> ClipboardStatus {
 pub fn read_clipboard(
     state: State<'_, ClipboardState>,
 ) -> Result<Option<ClipboardPayload>, String> {
-    let content = state.service()?.read().map_err(|err| err.to_string())?;
-    Ok(content.and_then(ClipboardPayload::from_content))
+    let snapshot = state.service()?.read().map_err(|err| err.to_string())?;
+    Ok(ClipboardPayload::from_snapshot(snapshot))
 }
 
 #[tauri::command(async)]

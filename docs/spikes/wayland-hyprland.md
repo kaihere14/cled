@@ -39,3 +39,13 @@ terminal alongside `wl-copy` / `wl-paste`.
   on arboard's silent fallback.
 - M3: repeat this spike on GNOME and KDE.
 - M4: decide whether clipboard content should outlive the Cled process.
+
+## Addendum (M2): images and privacy hints
+
+| Check | Result |
+| --- | --- |
+| Password-marked text (`x-kde-passwordManagerHint`, as KeePassXC sets it) | Detected from the format list in ~2 ms and skipped without reading the text. |
+| 2560×1440 screenshot (`grim`, `image/png`) | Read and decoded: ~35 ms in release, ~265 ms in debug. |
+| 5000×5000 image | Reported as too large. |
+| Writing an image | Other apps see `image/png` with the correct size. |
+| Polling cost with the screenshot on the clipboard | ~7.3% of a core (release) with full reads every poll; **~0.1%** after adding the Wayland change token. |

@@ -7,10 +7,24 @@ publish = false
 
 [dependencies]
 # Initial backend only; never exposed in the public API. See src/platform/.
-# `image-data` (default) is disabled until image support lands in M2.
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 log = "0.4"
 thiserror = "2"
 
+# Platform crates below are already pulled in by arboard; they're declared directly only to read
+# the clipboard's list of formats (for "don't record this" hints), which arboard doesn't expose.
+[target.'cfg(windows)'.dependencies]
+clipboard-win = { version = "5.3", features = ["std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSEnumerator"] }
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))))'.dependencies]
+wl-clipboard-rs = "0.9"
+x11rb = "0.13"
+
 [dev-dependencies]
 env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }

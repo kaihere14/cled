@@ -4,7 +4,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ClipboardPayload = { kind: "text"; text: string };
+export type ClipboardPayload =
+  | { kind: "text"; text: string }
+  | { kind: "image"; width: number; height: number; previewUrl: string | null }
+  | { kind: "skipped"; reason: SkippedReason };
+
+export type SkippedReason =
+  | { type: "sensitive" }
+  | { type: "tooLarge"; width: number; height: number };
 
 export type ClipboardStatus = { state: "watching" } | { state: "unavailable"; reason: string };
 

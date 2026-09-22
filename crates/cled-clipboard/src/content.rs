@@ -1,11 +1,14 @@
+use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 /// Content Cled knows how to read from and write to the clipboard.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ClipboardContent {
     /// UTF-8 text with line endings normalized to `\n`.
     Text(String),
+    Image(Image),
 }
 
 impl ClipboardContent {
@@ -17,27 +20,67 @@ impl ClipboardContent {
     pub fn text(text: &str) -> Self {
         Self::Text(normalize_line_endings(text))
     }
+}
 
-    /// A cheap identity for change detection.
-    ///
-    /// Only stable within a single process run (`DefaultHasher` is not guaranteed stable across
-    /// Rust versions or platforms). Must not be sent to other devices or persisted.
-    pub(crate) fn fingerprint(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
+/// A clipboard image as straight (non-premultiplied) RGBA, 8 bits per channel, row by row.
+///
+/// Every platform hands images over in this form, so the same picture compares equal no matter
+/// which OS or app copied it. Pixels are shared, so cloning an `Image` is cheap.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Image {
+    width: u32,
+    height: u32,
+    rgba: Arc<[u8]>,
+}
+
+impl Image {
+    /// Returns `None` if `rgba` isn't exactly `width * height * 4` bytes.
+    pub fn from_rgba(width: u32, height: u32, rgba: impl Into<Arc<[u8]>>) -> Option<Self> {
+        let rgba = rgba.into();
+        (Some(rgba.len()) == rgba_len(width, height)).then_some(Self {
+            width,
+            height,
+            rgba,
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
     }
 }
 
-impl Hash for ClipboardContent {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Self::Text(text) => {
-                "text".hash(state);
-                text.hash(state);
-            }
-        }
+impl fmt::Debug for Image {
+    // Don't dump megabytes of pixels into logs.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Image")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
     }
+}
+
+pub(crate) fn rgba_len(width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)
+}
+
+/// A cheap identity for change detection.
+///
+/// Only stable within a single process run (`DefaultHasher` is not guaranteed stable across
+/// Rust versions or platforms). Must not be sent to other devices or persisted.
+pub(crate) fn fingerprint(value: &impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn normalize_line_endings(text: &str) -> String {
@@ -64,13 +107,33 @@ mod tests {
     fn same_text_across_line_endings_has_same_fingerprint() {
         let windows = ClipboardContent::text("hello\r\nworld");
         let unix = ClipboardContent::text("hello\nworld");
-        assert_eq!(windows.fingerprint(), unix.fingerprint());
+        assert_eq!(fingerprint(&windows), fingerprint(&unix));
     }
 
     #[test]
     fn different_text_has_different_fingerprint() {
         let a = ClipboardContent::text("hello");
         let b = ClipboardContent::text("hello ");
-        assert_ne!(a.fingerprint(), b.fingerprint());
+        assert_ne!(fingerprint(&a), fingerprint(&b));
+    }
+
+    #[test]
+    fn image_requires_exact_pixel_buffer_length() {
+        assert!(Image::from_rgba(2, 1, vec![0; 8]).is_some());
+        assert!(Image::from_rgba(2, 1, vec![0; 7]).is_none());
+        assert!(Image::from_rgba(2, 1, vec![0; 9]).is_none());
+    }
+
+    #[test]
+    fn images_differing_only_in_shape_have_different_fingerprints() {
+        let wide = ClipboardContent::Image(Image::from_rgba(2, 1, vec![0; 8]).unwrap());
+        let tall = ClipboardContent::Image(Image::from_rgba(1, 2, vec![0; 8]).unwrap());
+        assert_ne!(fingerprint(&wide), fingerprint(&tall));
+    }
+
+    #[test]
+    fn image_debug_omits_pixels() {
+        let image = Image::from_rgba(1, 1, vec![1, 2, 3, 4]).unwrap();
+        assert_eq!(format!("{image:?}"), "Image { width: 1, height: 1, .. }");
     }
 }

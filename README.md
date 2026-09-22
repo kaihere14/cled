@@ -5,7 +5,7 @@
 Cled is an open-source, cross-platform clipboard synchronization app. Copy text or an image on one
 device and paste it on your other devices — Windows, macOS, and Linux (X11 and Wayland).
 
-> **Status: early development.** Cled can watch, read, and write the local text clipboard. Sync
+> **Status: early development.** Cled can watch, read, and write the local clipboard (text and images) and skips content that password managers mark as private. Sync
 > between devices is not implemented yet. Nothing here is usable as a product.
 
 ## Stack
@@ -62,6 +62,7 @@ To exercise the clipboard without the desktop app:
 cargo run -p cled-clipboard --example clip -- watch          # print clipboard changes
 cargo run -p cled-clipboard --example clip -- read
 cargo run -p cled-clipboard --example clip -- write "hello" --hold 5
+cargo run -p cled-clipboard --example clip -- write-image picture.png --hold 5
 ```
 
 See [docs/architecture.md](docs/architecture.md) for how the pieces fit together.

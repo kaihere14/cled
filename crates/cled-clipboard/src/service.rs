@@ -3,13 +3,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::detector::ChangeDetector;
-use crate::{Clipboard, ClipboardContent, ClipboardError, Result};
+use crate::{Clipboard, ClipboardContent, ClipboardError, Result, Snapshot};
 
 /// How often the service checks the clipboard for changes by default.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 enum Request {
-    Read(Sender<Result<Option<ClipboardContent>>>),
+    Read(Sender<Result<Snapshot>>),
     Write(ClipboardContent, Sender<Result<()>>),
     Stop,
 }
@@ -20,7 +20,8 @@ enum Request {
 /// while the writing process's clipboard handle is alive, and some tie clipboard access to one
 /// thread. All reads and writes go through this thread, so `ClipboardService` is `Send + Sync`.
 ///
-/// Changes are currently detected by polling. The service stops when dropped.
+/// Changes are detected by polling. Where the platform offers a cheap change indicator, a poll
+/// costs almost nothing unless the clipboard actually changed. The service stops when dropped.
 pub struct ClipboardService {
     requests: Sender<Request>,
     thread: Option<JoinHandle<()>>,
@@ -29,12 +30,12 @@ pub struct ClipboardService {
 impl ClipboardService {
     /// Starts the clipboard thread.
     ///
-    /// `on_change` runs on the clipboard thread whenever the clipboard content changes, including
-    /// changes made through [`ClipboardService::write`]. It is not called for the content present
-    /// at startup. Keep it fast; it delays the next clipboard check.
+    /// `on_change` runs on the clipboard thread whenever the clipboard changes, including changes
+    /// made through [`ClipboardService::write`]. It never receives [`Snapshot::Empty`] and is not
+    /// called for what's on the clipboard at startup. Keep it fast; it delays the next check.
     pub fn spawn<F>(poll_interval: Duration, on_change: F) -> Result<Self>
     where
-        F: FnMut(ClipboardContent) + Send + 'static,
+        F: FnMut(Snapshot) + Send + 'static,
     {
         let (requests, receiver) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -68,7 +69,7 @@ impl ClipboardService {
     }
 
     /// Reads the current clipboard content. See [`Clipboard::read`].
-    pub fn read(&self) -> Result<Option<ClipboardContent>> {
+    pub fn read(&self) -> Result<Snapshot> {
         let (reply, response) = mpsc::channel();
         self.send(Request::Read(reply))?;
         response
@@ -107,10 +108,11 @@ fn run<F>(
     poll_interval: Duration,
     mut on_change: F,
 ) where
-    F: FnMut(ClipboardContent),
+    F: FnMut(Snapshot),
 {
     let mut detector = ChangeDetector::default();
-    detector.baseline(clipboard.read().ok().flatten().as_ref());
+    let mut last_token = clipboard.change_token();
+    detector.baseline(&clipboard.read().unwrap_or(Snapshot::Empty));
 
     let mut last_error: Option<String> = None;
     let mut next_poll = Instant::now() + poll_interval;
@@ -127,14 +129,19 @@ fn run<F>(
             Ok(Request::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
                 next_poll = Instant::now() + poll_interval;
+
+                // Skip the full read when the platform can cheaply tell nothing changed.
+                let token = clipboard.change_token();
+                if token.is_some() && token == last_token {
+                    continue;
+                }
+                last_token = token;
+
                 match clipboard.read() {
-                    Ok(content) => {
+                    Ok(snapshot) => {
                         last_error = None;
-                        if detector.observe(content.as_ref()) {
-                            // `observe` only reports a change for `Some` content.
-                            if let Some(content) = content {
-                                on_change(content);
-                            }
+                        if detector.observe(&snapshot) {
+                            on_change(snapshot);
                         }
                     }
                     Err(ClipboardError::Busy) => {}

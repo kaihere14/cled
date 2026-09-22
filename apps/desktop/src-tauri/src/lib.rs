@@ -1,4 +1,5 @@
 mod clipboard;
+mod preview;
 
 use tauri::Manager;
 

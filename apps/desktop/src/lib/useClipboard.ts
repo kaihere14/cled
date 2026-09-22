@@ -8,7 +8,7 @@ import {
   writeClipboard,
 } from "./ipc";
 
-export type HistoryEntry = { id: number; text: string; copiedAt: Date };
+export type HistoryEntry = { id: number; payload: ClipboardPayload; copiedAt: Date };
 
 const HISTORY_LIMIT = 50;
 let nextId = 0;
@@ -26,9 +26,12 @@ export function useClipboard() {
     onClipboardChanged((payload) => {
       setCurrent(payload);
       setHistory((entries) => {
-        // Re-copying something already in history moves it to the top instead of duplicating it.
-        const rest = entries.filter((entry) => entry.text !== payload.text);
-        const entry = { id: nextId++, text: payload.text, copiedAt: new Date() };
+        // Re-copying text already in history moves it to the top instead of duplicating it.
+        const rest =
+          payload.kind === "text"
+            ? entries.filter((e) => !(e.payload.kind === "text" && e.payload.text === payload.text))
+            : entries;
+        const entry = { id: nextId++, payload, copiedAt: new Date() };
         return [entry, ...rest].slice(0, HISTORY_LIMIT);
       });
     }).then((fn) => {
