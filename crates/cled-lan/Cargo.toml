@@ -9,6 +9,8 @@ publish = false
 cled-clipboard = { path = "../cled-clipboard" }
 cled-sync = { path = "../cled-sync" }
 getrandom = "0.3"
+# Local interfaces and subnets, to rank a device's addresses. Already compiled in via mdns-sd.
+if-addrs = "0.15"
 # PNG only: images travel as PNG and are decoded back to RGBA on arrival.
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
@@ -18,6 +20,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Only the primitives Cled uses (X25519, ChaCha20-Poly1305, BLAKE2s). Snow's default "std"
 # feature also pulls in `ring`, a C-compiled crypto library Cled doesn't need.
+# IPv6 listener that doesn't also claim IPv4 (the default differs by OS). Already in via tokio.
+socket2 = "0.6"
 snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-blake2", "use-chacha20poly1305", "use-curve25519", "use-getrandom"] }
 spake2 = "0.4"
 thiserror = "2"

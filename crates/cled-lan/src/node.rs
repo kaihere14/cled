@@ -1,7 +1,7 @@
 //! The running sync node: accepts and dials connections, pairs devices, and moves items.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,6 +28,8 @@ const KIND_SESSION: u8 = 1;
 const KIND_PAIRING: u8 = 2;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Per address; a device's addresses are tried in turn.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const PING_INTERVAL: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -121,6 +123,20 @@ impl LanNode {
         let peers = PeerStore::load(&config.peers_path)?;
         let listener = runtime.block_on(TcpListener::bind(config.listen))?;
         let local_addr = listener.local_addr()?;
+        // Listening on all IPv4 interfaces: also accept IPv6 on the same port, since devices
+        // may be discovered (and dialed) by their IPv6 address.
+        let listener_v6 = if config.listen.ip() == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+            let _runtime = runtime.enter();
+            match bind_ipv6(local_addr.port()).and_then(TcpListener::from_std) {
+                Ok(listener) => Some(listener),
+                Err(err) => {
+                    log::warn!("not accepting IPv6 connections: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let (events, receiver) = std::sync::mpsc::channel();
 
         let discovery = if config.discovery {
@@ -151,6 +167,9 @@ impl LanNode {
         });
 
         runtime.spawn(accept_loop(Arc::clone(&inner), listener));
+        if let Some(listener_v6) = listener_v6 {
+            runtime.spawn(accept_loop(Arc::clone(&inner), listener_v6));
+        }
         runtime.spawn(dial_loop(Arc::clone(&inner)));
         if let Some(discovery) = &inner.discovery {
             runtime.spawn(discovery.run(Arc::downgrade(&inner)));
@@ -224,7 +243,26 @@ impl LanNode {
     pub fn pair_with(&self, address: SocketAddr, code: &str) -> Result<PeerStatus> {
         let code = PairingCode::parse(code)?;
         let inner = Arc::clone(&self.inner);
-        self.block_on(async move { inner.join_pairing(address, code).await })
+        self.block_on(async move { inner.join_pairing(vec![address], code).await })
+    }
+
+    /// Pairs with a device found on the network (see [`LanNode::pairable_devices`]), trying
+    /// each of its addresses in turn.
+    pub fn pair_with_device(&self, device_id: DeviceId, code: &str) -> Result<PeerStatus> {
+        let code = PairingCode::parse(code)?;
+        let addresses = self
+            .inner
+            .discovery
+            .as_ref()
+            .map(|d| d.addresses_of(device_id))
+            .unwrap_or_default();
+        if addresses.is_empty() {
+            return Err(LanError::Other(
+                "that device is no longer visible on the network".into(),
+            ));
+        }
+        let inner = Arc::clone(&self.inner);
+        self.block_on(async move { inner.join_pairing(addresses, code).await })
     }
 
     /// Forgets a paired device. If it's online, it's told first so it forgets this one too.
@@ -395,12 +433,20 @@ impl Inner {
         lock(&self.conns).contains_key(&peer)
     }
 
-    /// Where to reach a paired device: freshly discovered address first, then the last known.
-    fn address_of(&self, peer: &Peer) -> Option<SocketAddr> {
-        self.discovery
+    /// Where to reach a paired device, best first: freshly discovered addresses, then the last
+    /// address that worked.
+    fn addresses_of(&self, peer: &Peer) -> Vec<SocketAddr> {
+        let mut addresses = self
+            .discovery
             .as_ref()
-            .and_then(|d| d.address_of(peer.device_id))
-            .or(peer.last_address)
+            .map(|d| d.addresses_of(peer.device_id))
+            .unwrap_or_default();
+        if let Some(last) = peer.last_address
+            && !addresses.contains(&last)
+        {
+            addresses.push(last);
+        }
+        addresses
     }
 
     // ---- Pairing: the side showing the code ----
@@ -426,7 +472,7 @@ impl Inner {
     }
 
     async fn accept_pairing(self: &Arc<Self>, stream: TcpStream, joiner: DeviceId) -> Result<()> {
-        let peer_ip = stream.peer_addr()?.ip();
+        let peer_addr = stream.peer_addr()?;
         let mut session = self.pairing.lock().await;
         let Some(active) = session.as_mut() else {
             return Err(LanError::NotPairing); // Closing tells the joiner.
@@ -453,7 +499,7 @@ impl Inner {
                 drop(session);
                 self.end_pairing().await;
                 let name = hello.name.clone();
-                self.store_peer(joiner, hello, public_key, peer_ip)?;
+                self.store_peer(joiner, hello, public_key, peer_addr)?;
                 self.emit(Event::Paired {
                     device_id: joiner,
                     name,
@@ -483,12 +529,10 @@ impl Inner {
 
     async fn join_pairing(
         self: &Arc<Self>,
-        address: SocketAddr,
+        addresses: Vec<SocketAddr>,
         code: PairingCode,
     ) -> Result<PeerStatus> {
-        let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(address))
-            .await
-            .map_err(|_| LanError::Timeout)??;
+        let (stream, address) = connect_any(&addresses).await?;
         let (mut reader, mut writer) = stream.into_split();
         writer
             .write_all(&preamble(KIND_PAIRING, self.config.device_id))
@@ -509,7 +553,7 @@ impl Inner {
         .map_err(|_| LanError::Timeout)??;
 
         let name = hello.name.clone();
-        self.store_peer(listener, hello, public_key, address.ip())?;
+        self.store_peer(listener, hello, public_key, address)?;
         self.emit(Event::PeersChanged);
         self.trigger_dial(listener);
         Ok(PeerStatus {
@@ -578,21 +622,22 @@ impl Inner {
         Ok((hello, public_key))
     }
 
-    /// Saves a newly paired device. Its address is the IP it connected from (or was reached
-    /// at) plus the port it listens on, as announced in its `Hello`.
+    /// Saves a newly paired device. Its address is the one it connected from (or was reached
+    /// at) with the port it listens on, as announced in its `Hello`.
     fn store_peer(
         &self,
         id: DeviceId,
         hello: Hello,
         public_key: [u8; 32],
-        ip: IpAddr,
+        address: SocketAddr,
     ) -> Result<()> {
+        let last_address = Some(with_port(address, hello.listen_port));
         lock(&self.peers).upsert(Peer {
             device_id: id,
             name: hello.name,
             public_key,
             paired_at_ms: now_ms(),
-            last_address: Some(SocketAddr::new(ip, hello.listen_port)),
+            last_address,
         })
     }
 
@@ -627,11 +672,11 @@ impl Inner {
             return;
         }
         let peer = lock(&self.peers).get(peer_id).cloned();
-        let result = match peer
-            .as_ref()
-            .and_then(|p| self.address_of(p).map(|a| (p, a)))
-        {
-            Some((peer, address)) => Arc::clone(&self).connect(peer.clone(), address).await,
+        let result = match peer {
+            Some(peer) => {
+                let addresses = self.addresses_of(&peer);
+                Arc::clone(&self).connect(peer, addresses).await
+            }
             None => Err(LanError::UnknownPeer),
         };
         lock(&self.dialing).remove(&peer_id);
@@ -655,10 +700,8 @@ impl Inner {
 
     /// Dials a paired device. Returns once the connection is established (it keeps running in
     /// the background).
-    async fn connect(self: Arc<Self>, peer: Peer, address: SocketAddr) -> Result<()> {
-        let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(address))
-            .await
-            .map_err(|_| LanError::Timeout)??;
+    async fn connect(self: Arc<Self>, peer: Peer, addresses: Vec<SocketAddr>) -> Result<()> {
+        let (stream, address) = connect_any(&addresses).await?;
         let me = self.config.device_id;
         let (mut reader, mut writer) = stream.into_split();
         writer.write_all(&preamble(KIND_SESSION, me)).await?;
@@ -687,13 +730,13 @@ impl Inner {
             &mut writer,
         )
         .await?;
-        let address = SocketAddr::new(address.ip(), hello.listen_port);
+        let address = with_port(address, hello.listen_port);
         self.start_session(peer.device_id, me, hello, address, cipher, reader, writer);
         Ok(())
     }
 
     async fn accept_session(self: Arc<Self>, stream: TcpStream, initiator: DeviceId) -> Result<()> {
-        let peer_ip = stream.peer_addr()?.ip();
+        let peer_addr = stream.peer_addr()?;
         let (peer, was_removed) = {
             let peers = lock(&self.peers);
             match (peers.get(initiator), peers.get_removed(initiator)) {
@@ -729,7 +772,7 @@ impl Inner {
             lock(&self.peers).forget_removed(initiator)?;
             return Ok(());
         }
-        let address = SocketAddr::new(peer_ip, hello.listen_port);
+        let address = with_port(peer_addr, hello.listen_port);
         self.start_session(initiator, initiator, hello, address, cipher, reader, writer);
         Ok(())
     }
@@ -968,13 +1011,82 @@ pub(crate) fn on_discovered(inner: &Arc<Inner>, device: DeviceId) {
     }
 }
 
-pub(crate) fn preferred_ip(addresses: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
-    let mut addresses: Vec<IpAddr> = addresses.into_iter().collect();
-    // IPv4 first (most home networks), then non-link-local IPv6.
-    addresses.sort_by_key(|ip| match ip {
-        IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => 0,
-        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) != 0xfe80 => 1,
-        _ => 2,
-    });
-    addresses.into_iter().next()
+/// Connects to the first reachable address, trying them in order.
+async fn connect_any(addresses: &[SocketAddr]) -> Result<(TcpStream, SocketAddr)> {
+    let mut last_error = LanError::UnknownPeer;
+    for &address in addresses {
+        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => return Ok((stream, address)),
+            Ok(Err(err)) => {
+                log::debug!("could not reach {address}: {err}");
+                last_error = err.into();
+            }
+            Err(_) => last_error = LanError::Timeout,
+        }
+    }
+    Err(last_error)
+}
+
+/// `address` with a different port. Keeps an IPv6 scope, unlike building a new address from
+/// just the IP.
+fn with_port(mut address: SocketAddr, port: u16) -> SocketAddr {
+    address.set_port(port);
+    address
+}
+
+/// An IPv6-only listener, so it can share a port number with the IPv4 listener on every OS
+/// (some default to dual-stack sockets, Windows doesn't).
+fn bind_ipv6(port: u16) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(true)?;
+    socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(128)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_any_skips_unreachable_addresses() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good = listener.local_addr().unwrap();
+        // A port nothing listens on: refused, like a device's unusable address.
+        let dead = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        let (_, used) = connect_any(&[dead, good]).await.unwrap();
+        assert_eq!(used, good);
+    }
+
+    #[tokio::test]
+    async fn connect_any_reports_failure_when_nothing_answers() {
+        let dead = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert!(connect_any(&[dead]).await.is_err());
+        assert!(connect_any(&[]).await.is_err());
+    }
+
+    #[test]
+    fn with_port_keeps_ipv6_scope() {
+        let scoped: SocketAddr = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            1,
+            0,
+            3,
+        ));
+        let SocketAddr::V6(v6) = with_port(scoped, 4000) else {
+            unreachable!()
+        };
+        assert_eq!((v6.port(), v6.scope_id()), (4000, 3));
+    }
 }

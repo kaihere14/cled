@@ -4,6 +4,7 @@
 //! This crate moves [`cled_sync::ClipboardItem`]s between devices. Deciding what to send and
 //! what to apply is the job of `cled_sync::SyncEngine`; the app wires the two together.
 
+mod addr;
 mod code;
 mod discovery;
 mod error;

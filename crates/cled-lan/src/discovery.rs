@@ -5,22 +5,36 @@
 //! don't learn hostnames.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::sync::{Arc, Mutex, Weak};
 
 use cled_sync::DeviceId;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 
-use crate::node::{Inner, PairableDevice, on_discovered, preferred_ip};
+use crate::addr::rank;
+use crate::node::{Inner, PairableDevice, on_discovered};
 use crate::wire::PROTOCOL_VERSION;
 
 const SERVICE_TYPE: &str = "_cled._tcp.local.";
 
 struct Found {
     device_id: DeviceId,
-    address: SocketAddr,
+    port: u16,
+    /// Every address seen for this announcement. Announcements often arrive in parts (e.g. a
+    /// link-local IPv6 address first, the IPv4 one a moment later), so they're merged.
+    /// IPv6 link-local addresses carry the scope (interface) they were seen on.
+    ips: Vec<(IpAddr, u32)>,
     /// Set while the device is showing a pairing code.
     pairing_name: Option<String>,
+}
+
+impl Found {
+    fn addresses(&self) -> Vec<SocketAddr> {
+        rank(self.ips.iter().map(|&(ip, scope)| match ip {
+            IpAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(v6, self.port, 0, scope)),
+            IpAddr::V4(_) => SocketAddr::new(ip, self.port),
+        }))
+    }
 }
 
 pub(crate) struct Discovery {
@@ -70,11 +84,13 @@ impl Discovery {
         }
     }
 
-    pub(crate) fn address_of(&self, device: DeviceId) -> Option<SocketAddr> {
+    /// A device's addresses, best first.
+    pub(crate) fn addresses_of(&self, device: DeviceId) -> Vec<SocketAddr> {
         lock(&self.found)
             .values()
-            .find(|f| f.device_id == device)
-            .map(|f| f.address)
+            .filter(|f| f.device_id == device)
+            .flat_map(Found::addresses)
+            .collect()
     }
 
     pub(crate) fn pairable(&self, me: DeviceId) -> Vec<PairableDevice> {
@@ -85,7 +101,7 @@ impl Discovery {
                 Some(PairableDevice {
                     device_id: f.device_id,
                     name: f.pairing_name.clone()?,
-                    address: f.address,
+                    address: *f.addresses().first()?,
                 })
             })
             .collect()
@@ -115,22 +131,36 @@ impl Discovery {
                         if device_id == me {
                             continue;
                         }
-                        let Some(ip) =
-                            preferred_ip(service.get_addresses().iter().map(|a| a.to_ip_addr()))
-                        else {
-                            continue;
-                        };
                         let pairing_name = (service.get_property_val_str("pair") == Some("1"))
                             .then(|| service.get_property_val_str("name").map(str::to_owned))
                             .flatten();
-                        lock(&found).insert(
-                            service.get_fullname().to_owned(),
-                            Found {
+                        let ips = service.get_addresses().iter().map(|ip| match ip {
+                            ScopedIp::V6(v6) => (IpAddr::V6(*v6.addr()), v6.scope_id().index),
+                            other => (other.to_ip_addr(), 0),
+                        });
+
+                        let mut found = lock(&found);
+                        let entry = found
+                            .entry(service.get_fullname().to_owned())
+                            .or_insert_with(|| Found {
                                 device_id,
-                                address: SocketAddr::new(ip, service.get_port()),
-                                pairing_name,
-                            },
-                        );
+                                port: service.get_port(),
+                                ips: Vec::new(),
+                                pairing_name: None,
+                            });
+                        if entry.port != service.get_port() || entry.device_id != device_id {
+                            // The device restarted on a new port (or the name was reused).
+                            entry.ips.clear();
+                        }
+                        entry.device_id = device_id;
+                        entry.port = service.get_port();
+                        entry.pairing_name = pairing_name;
+                        for ip in ips {
+                            if !entry.ips.contains(&ip) {
+                                entry.ips.push(ip);
+                            }
+                        }
+                        drop(found);
                         match inner.upgrade() {
                             Some(inner) => on_discovered(&inner, device_id),
                             None => return,

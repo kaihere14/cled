@@ -1,6 +1,7 @@
 //! Real nodes talking over localhost TCP: pairing, encrypted sessions, item delivery, removal,
 //! reconnection, and impersonation attempts. Discovery (mDNS) is off; nodes are dialed directly.
 
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -263,4 +264,24 @@ fn reconnects_after_a_device_restarts() {
     wait_until("reconnected", || {
         online(&a, b.config.device_id) && online(&b, a.config.device_id)
     });
+}
+
+#[test]
+fn a_device_listening_on_all_interfaces_accepts_ipv6() {
+    // Like the app: listening on every interface. Devices are often discovered by an IPv6
+    // address, so IPv6 connections must work too.
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(
+        Config {
+            listen: "0.0.0.0:0".parse().unwrap(),
+            ..config("a", &dir)
+        },
+        dir,
+    );
+    let b = new_node("b");
+
+    let code = a.node.start_pairing().unwrap();
+    let ipv6 = SocketAddr::from((Ipv6Addr::LOCALHOST, a.node.local_addr().port()));
+    let peer = b.node.pair_with(ipv6, &code.to_string()).unwrap();
+    assert_eq!(peer.name, "a");
 }

@@ -9,10 +9,31 @@ export function Devices() {
   const [pairing, setPairing] = useState(false);
 
   const refresh = useCallback(() => {
-    syncStatus().then(setStatus);
+    syncStatus()
+      .then(setStatus)
+      .catch(() => {});
   }, []);
-  useEffect(refresh, [refresh]);
+
+  // Live updates. Subscribed before the first fetch below (effects run in order).
   useTauriEvent(useCallback(() => onSyncChanged(refresh), [refresh]));
+
+  // Events can be missed, e.g. a connection that completes while the window is starting or
+  // hidden in the tray. Re-check when the window comes back, and every few seconds while it's
+  // showing, so the list never stays wrong.
+  useEffect(() => {
+    refresh();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const timer = setInterval(onVisible, 5000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refresh]);
 
   if (!status) return null;
 
