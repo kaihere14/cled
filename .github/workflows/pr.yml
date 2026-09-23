@@ -1,0 +1,52 @@
+name: Pull request
+
+# Every check a pull request must pass. For branch protection, require the single "All checks
+# passed" job; it fails if any other job fails or is skipped.
+
+on:
+  pull_request:
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  audit:
+    name: Audit
+    uses: ./.github/workflows/audit.yml
+
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # Flags dependencies added or changed by this PR (Rust and npm) that have known
+      # vulnerabilities.
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+
+  all-checks:
+    name: All checks passed
+    if: always()
+    needs: [ci, audit, dependency-review]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              echo "::error::A required check did not succeed ($result)"
+              exit 1
+            fi
+          done

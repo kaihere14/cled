@@ -3,6 +3,7 @@ name = "cled-desktop"
 description = "Cled desktop application"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [lib]

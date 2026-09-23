@@ -35,7 +35,7 @@ These builds are **not code-signed** yet, so each OS warns before running them. 
 for development builds.
 
 - **Windows:** SmartScreen shows "Windows protected your PC". Click **More info → Run anyway**.
-  Windows may also ask whether Cled can use networks once sync exists.
+  Windows may also ask whether Cled can use networks. Allow it, or devices can't sync.
 - **macOS:** Gatekeeper refuses to open it ("cannot be verified" or "is damaged"). After moving
   Cled to Applications, either open **System Settings → Privacy & Security** and click
   **Open Anyway**, or run:

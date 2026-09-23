@@ -1,0 +1,3 @@
+# Fast checks on staged files only: Biome (lint + format) for the frontend and config, rustfmt for
+# Rust. Fixes are applied and re-staged. Slower checks run before pushing (see pre-push).
+pnpm exec lint-staged

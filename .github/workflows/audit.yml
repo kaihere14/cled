@@ -1,0 +1,40 @@
+name: Audit
+
+# Checks Rust dependencies (Cargo.lock) against the RustSec advisory database. Fails on known
+# vulnerabilities; unmaintained or yanked crates are reported as warnings.
+#
+# Runs when dependencies change on main, on every pull request (via pr.yml), and weekly, because
+# new advisories appear for crates that haven't changed. To accept an advisory that doesn't affect Cled, add its ID with a reason to
+# `.cargo/audit.toml` (see https://docs.rs/cargo-audit).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - Cargo.lock
+      - .github/workflows/audit.yml
+  # Pull requests run this through pr.yml.
+  workflow_call:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # Prebuilt binary: no compiling, so this job takes seconds.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

@@ -1,9 +1,10 @@
 name: CI
 
+# Pull requests run this through pr.yml.
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}

@@ -1,0 +1,21 @@
+# The same checks CI runs, so problems show up before a pull request instead of after.
+# Skip in an emergency with `git push --no-verify`.
+set -e
+
+echo "pre-push: frontend lint + typecheck"
+pnpm check
+
+# Tauri embeds the built frontend at compile time, so clippy and tests need it to exist.
+if [ ! -d apps/desktop/dist ]; then
+  echo "pre-push: building frontend (needed by the Rust build)"
+  pnpm --filter cled-desktop build
+fi
+
+echo "pre-push: rustfmt"
+cargo fmt --all --check
+
+echo "pre-push: clippy"
+cargo clippy --workspace --all-targets --locked -- -D warnings
+
+echo "pre-push: tests"
+cargo test --workspace --locked

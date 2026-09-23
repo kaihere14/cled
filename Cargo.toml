@@ -5,7 +5,7 @@ members = ["apps/desktop/src-tauri", "crates/cled-clipboard", "crates/cled-lan",
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# TODO(license): set `license` once the project license is decided.
+license = "MIT"
 
 # Profiles only take effect at the workspace root.
 # See https://tauri.app/concept/size/#cargo-configuration

@@ -12,7 +12,7 @@ device and paste it on your other devices — Windows, macOS, and Linux (X11 and
 ## Stack
 
 - [Tauri 2](https://tauri.app) desktop shell
-- Rust for all native functionality (clipboard, platform integration, and later sync/encryption)
+- Rust for all native functionality (clipboard, platform integration, sync, and encryption)
 - React + TypeScript + Tailwind CSS for the UI
 
 ## Repository layout
@@ -32,7 +32,7 @@ docs/                  Architecture and design documents
 ### Prerequisites
 
 - [Rust](https://rustup.rs) (the toolchain is pinned via `rust-toolchain.toml`)
-- [Node.js](https://nodejs.org) 22+ and [pnpm](https://pnpm.io) (`corepack enable` works)
+- [Node.js](https://nodejs.org) 22.22+ and [pnpm](https://pnpm.io) (`corepack enable` works)
 - Tauri's platform dependencies — see [Tauri prerequisites](https://tauri.app/start/prerequisites/)
 
 On Fedora:
@@ -81,6 +81,11 @@ Note: Rust builds of the desktop app expect the frontend to have been built once
 (`pnpm --filter cled-desktop build`), because Tauri embeds `apps/desktop/dist` at compile time.
 `pnpm dev` handles this for you.
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started, and
+[SECURITY.md](SECURITY.md) for reporting security issues privately.
+
 ## License
 
-To be decided.
+Cled is licensed under the [MIT License](LICENSE).

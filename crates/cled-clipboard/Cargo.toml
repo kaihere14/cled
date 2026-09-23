@@ -3,6 +3,7 @@ name = "cled-clipboard"
 description = "Cross-platform clipboard access and change detection for Cled"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

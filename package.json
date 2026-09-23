@@ -1,14 +1,22 @@
 {
   "name": "cled",
   "private": true,
+  "license": "MIT",
   "packageManager": "pnpm@11.20.0",
   "scripts": {
     "dev": "pnpm --filter cled-desktop tauri dev",
     "build": "pnpm --filter cled-desktop tauri build",
     "check": "biome check . && pnpm --filter cled-desktop typecheck",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,json,jsonc,css}": "biome check --write --no-errors-on-unmatched --files-ignore-unknown=true",
+    "*.rs": "rustfmt --edition 2024"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.14"
+    "@biomejs/biome": "^2.5.14",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.1"
   }
 }

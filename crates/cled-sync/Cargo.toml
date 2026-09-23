@@ -3,6 +3,7 @@ name = "cled-sync"
 description = "Clipboard items and sync rules (loop prevention, deduplication) for Cled"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

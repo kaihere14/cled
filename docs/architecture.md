@@ -1,7 +1,7 @@
 # Architecture
 
-This document describes how Cled is built today. It grows with the code; sections for sync,
-encryption, and the server will be added when those exist.
+This document describes how Cled is built today. It grows with the code; a section for the relay
+server will be added when it exists.
 
 ## Overview
 
@@ -22,8 +22,7 @@ crates/cled-lan            Same-network sync: mDNS discovery, pairing (SPAKE2 + 
      │                     encrypted sessions (Noise KK), wire format. Moves items; decides nothing.
      │
 apps/desktop/src-tauri     Tauri glue only: commands, events, payload types, device ID file
-     │   commands: clipboard_status, read_clipboard, write_clipboard
-     │   event:    clipboard:changed
+     │                     (see "Desktop app" below for the full list)
      │
 apps/desktop/src           React UI: renders state, calls commands, listens to events
 ```
@@ -257,7 +256,15 @@ and the network:
 | `write_clipboard(text)` | UI → Rust | `void` or error string |
 | `get_autostart` / `set_autostart(enabled)` | UI → Rust | `boolean` / `void` |
 | `quit` | UI → Rust | Exits (with the clipboard hand-off) |
+| `sync_status` | UI → Rust | `{ unavailable, deviceName, address, peers: [{ id, name, online }] }` |
+| `start_pairing` / `cancel_pairing` | UI → Rust | Pairing code `string` / `void` |
+| `pairable_devices` | UI → Rust | `[{ id, name, address }]`: devices currently showing a code |
+| `pair_with(address, code)` | UI → Rust | Paired device's name, or error string |
+| `remove_peer(id)` | UI → Rust | `void` or error string |
 | `clipboard:changed` | Rust → UI | `{ item: { id, origin } \| null, content: ClipboardPayload }` |
+| `sync:changed` | Rust → UI | Paired devices or their status changed; call `sync_status` |
+| `sync:pairing-code` | Rust → UI | Replacement pairing code, or `null` when it expired |
+| `sync:paired` | Rust → UI | Pairing succeeded on the code-showing side; the other device's name |
 
 `ClipboardPayload` is one of:
 
@@ -266,9 +273,9 @@ and the network:
   (longest edge 480 px) generated in Rust. The UI never receives full-size pixels.
 - `{ kind: "skipped", reason: { type: "sensitive" } | { type: "tooLarge", width, height } }`
 
-`origin` is `{ kind: "thisDevice" }` or `{ kind: "otherDevice", deviceId }`. Every clipboard
-change goes through the `SyncEngine`, so each copy gets an item ID. Skipped content never becomes
-an item.
+`origin` is `{ kind: "thisDevice" }` or `{ kind: "otherDevice", deviceId, name }`, where `name`
+is `null` if that device is no longer paired. Every clipboard change goes through the
+`SyncEngine`, so each copy gets an item ID. Skipped content never becomes an item.
 
 TypeScript types for these live in `apps/desktop/src/lib/ipc.ts` and are kept in sync by hand.
 Commands run off the UI thread (`#[tauri::command(async)]`) because clipboard calls can block.
@@ -299,4 +306,4 @@ History shown in the UI is in memory only and disappears when the app closes.
   [GNOME spike](spikes/gnome.md).
 - Images in history can't be copied again from the UI. Only thumbnails are kept, and full-size
   history storage comes later.
-- No sync or history persistence.
+- History is not persisted, and sync works only between devices on the same network.
