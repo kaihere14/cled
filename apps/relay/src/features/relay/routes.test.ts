@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
+import { PassThrough } from "node:stream";
 import { type TestContext, test } from "node:test";
 import type { WebSocket } from "@fastify/websocket";
 import type { FastifyInstance } from "fastify";
-import { loadConfig } from "../../config.ts";
-import { buildServer } from "../../server.ts";
-import type { DeviceId, UserId } from "./identity.ts";
+import type { UserId } from "../../auth/identity.ts";
+import { buildServer, type ServerOptions } from "../../server.ts";
+import { accessToken, TEST_SECRET_KEY, testConfig } from "../../testing/clerk.ts";
+import type { DeviceId } from "./identity.ts";
 import { type ServerMessage, serverMessageSchema } from "./protocol.ts";
 import { ConnectionRegistry } from "./registry.ts";
-import { REPLACED_CLOSE_CODE } from "./routes.ts";
-
-const config = loadConfig({ LOG_LEVEL: "silent" });
+import { AUTH_TIMEOUT_CLOSE_CODE, REPLACED_CLOSE_CODE, UNAUTHORIZED_CLOSE_CODE } from "./routes.ts";
 
 const user = (id: string) => id as UserId;
 const device = (id: string) => id as DeviceId;
+
+const UNAUTHORIZED = { type: "error", code: "unauthorized", message: "Authentication failed" };
 
 /** A WebSocket client that queues what the relay sends, so tests can await each message. */
 interface Client {
@@ -24,9 +26,10 @@ interface Client {
   closed: Promise<number>;
 }
 
-async function setup(t: TestContext) {
+async function setup(t: TestContext, options: ServerOptions & { logLevel?: string } = {}) {
   const connections = new ConnectionRegistry();
-  const app = await buildServer(config, { connections });
+  const config = testConfig(options.logLevel ? { LOG_LEVEL: options.logLevel } : {});
+  const app = await buildServer(config, { connections, ...options });
   t.after(() => {
     // `injectWS` streams never end the way TCP sockets do, so a server socket mid-close handshake
     // would hold the process open for ws's 30 s close timeout. Cut them off instead.
@@ -67,11 +70,20 @@ async function connect(app: FastifyInstance): Promise<Client> {
   };
 }
 
+/** Connects and registers `deviceId` with a valid token for `userId`. */
 async function register(app: FastifyInstance, userId: string, deviceId: string): Promise<Client> {
   const client = await connect(app);
-  client.send({ type: "register", userId, deviceId });
+  client.send({ type: "register", accessToken: accessToken(userId), deviceId });
   assert.deepEqual(await client.next(), { type: "registered", userId, deviceId });
   return client;
+}
+
+/** Sends a registration with `token` and expects it to be rejected and the connection closed. */
+async function expectRejected(app: FastifyInstance, token: string): Promise<void> {
+  const client = await connect(app);
+  client.send({ type: "register", accessToken: token, deviceId: "mac" });
+  assert.deepEqual(await client.next(), UNAUTHORIZED);
+  assert.equal(await client.closed, UNAUTHORIZED_CLOSE_CODE);
 }
 
 /** Waits for the relay to process something that has no reply, such as a disconnect. */
@@ -90,48 +102,84 @@ function devicesOf(connections: ConnectionRegistry, userId: string): string[] {
     .sort();
 }
 
-test("a client connects and registers with a user and device ID", async (t) => {
+test("a valid access token registers the device under the token's user", async (t) => {
   const { app, connections } = await setup(t);
 
   const client = await connect(app);
   assert.equal(client.socket.readyState, client.socket.OPEN);
   assert.equal(connections.connectionCount, 0, "not registered before `register`");
 
-  client.send({ type: "register", userId: "user-1", deviceId: "mac" });
-  assert.deepEqual(await client.next(), { type: "registered", userId: "user-1", deviceId: "mac" });
+  client.send({ type: "register", accessToken: accessToken("user_A"), deviceId: "mac" });
+  assert.deepEqual(await client.next(), { type: "registered", userId: "user_A", deviceId: "mac" });
 
-  const registered = connections.getConnection(user("user-1"), device("mac"));
+  const registered = connections.getConnection(user("user_A"), device("mac"));
   assert.ok(registered);
-  assert.equal(connections.getUserConnections(user("user-1")).length, 1);
+  assert.equal(registered.userId, "user_A");
   client.socket.terminate();
 });
 
-test("invalid registrations are rejected and leave the connection unregistered", async (t) => {
+test("tokens that fail verification are rejected and never registered", async (t) => {
+  const { app, connections } = await setup(t);
+  const now = Math.floor(Date.now() / 1000);
+
+  const rejected = {
+    "not a JWT": "hello",
+    "wrong signature": accessToken("user_A", { untrustedKey: true }),
+    "tampered payload": (() => {
+      const [header, , signature] = accessToken("user_A").split(".");
+      const payload = Buffer.from(JSON.stringify({ sub: "user_B" })).toString("base64url");
+      return `${header}.${payload}.${signature}`;
+    })(),
+    expired: accessToken("user_A", { claims: { exp: now - 60, iat: now - 700, nbf: now - 700 } }),
+    "not yet valid": accessToken("user_A", { claims: { nbf: now + 300 } }),
+    "no sub": accessToken(undefined),
+    "unusable sub": accessToken("user with spaces"),
+    "wrong issuer": accessToken("user_A", { claims: { iss: "https://evil.example" } }),
+    "other OAuth application": accessToken("user_A", { claims: { client_id: "someone_else" } }),
+    // A Clerk session token (from the browser SDKs) is not an OAuth access token.
+    "session token": accessToken("user_A", { header: { typ: "JWT" } }),
+    "unsigned (alg none)": (() => {
+      const [, payload] = accessToken("user_A").split(".");
+      const header = Buffer.from(JSON.stringify({ alg: "none", typ: "at+jwt" })).toString(
+        "base64url",
+      );
+      return `${header}.${payload}.`;
+    })(),
+  };
+  for (const [name, token] of Object.entries(rejected)) {
+    await t.test(name, () => expectRejected(app, token));
+  }
+  assert.equal(connections.connectionCount, 0);
+});
+
+test("registrations without a token, or naming a user, are rejected", async (t) => {
   const { app, connections } = await setup(t);
   const client = await connect(app);
+  const token = accessToken("user_A");
 
   const invalid = [
-    { type: "register", userId: "user-1" },
-    { type: "register", userId: "", deviceId: "mac" },
-    { type: "register", userId: "user-1", deviceId: "" },
-    { type: "register", userId: "user 1", deviceId: "mac" },
-    { type: "register", userId: "u".repeat(129), deviceId: "mac" },
-    { type: "register", userId: 42, deviceId: "mac" },
+    { type: "register", deviceId: "mac" },
+    { type: "register", accessToken: "", deviceId: "mac" },
+    { type: "register", accessToken: 42, deviceId: "mac" },
+    { type: "register", accessToken: token },
+    { type: "register", accessToken: token, deviceId: "" },
+    { type: "register", accessToken: token, deviceId: "mac book" },
+    // The user comes from the token only; a client can't even suggest one.
+    { type: "register", accessToken: token, deviceId: "mac", userId: "user_B" },
+    { type: "register", userId: "user_A", deviceId: "mac" },
     { type: "unknown" },
-    ["register"],
     null,
   ];
   for (const message of invalid) {
     client.send(message);
     const reply = await client.next();
-    assert.equal(reply.type, "error");
     assert.equal(reply.type === "error" && reply.code, "invalid_message", JSON.stringify(message));
   }
   assert.equal(connections.connectionCount, 0);
 
-  // Still usable afterwards.
-  client.send({ type: "register", userId: "user-1", deviceId: "mac" });
-  assert.equal((await client.next()).type, "registered");
+  // Still usable afterwards, and the user is the token's.
+  client.send({ type: "register", accessToken: token, deviceId: "mac" });
+  assert.deepEqual(await client.next(), { type: "registered", userId: "user_A", deviceId: "mac" });
   client.socket.terminate();
 });
 
@@ -150,14 +198,14 @@ test("malformed input gets an error and doesn't crash the relay", async (t) => {
   const binary = await client.next();
   assert.equal(binary.type === "error" && binary.code, "invalid_json");
 
-  client.send({ type: "message", targetUserId: "user-2", message: "hi" });
+  client.send({ type: "message", message: "hi" });
   const unregistered = await client.next();
   assert.equal(unregistered.type === "error" && unregistered.code, "not_registered");
 
   // The same connection still works, and so does the rest of the server.
-  client.send({ type: "register", userId: "user-1", deviceId: "mac" });
+  client.send({ type: "register", accessToken: accessToken("user_A"), deviceId: "mac" });
   assert.equal((await client.next()).type, "registered");
-  client.send({ type: "register", userId: "user-1", deviceId: "linux" });
+  client.send({ type: "register", accessToken: accessToken("user_A"), deviceId: "linux" });
   const again = await client.next();
   assert.equal(again.type === "error" && again.code, "already_registered");
 
@@ -166,82 +214,96 @@ test("malformed input gets an error and doesn't crash the relay", async (t) => {
   client.socket.terminate();
 });
 
-test("test messages reach every other device of the target user", async (t) => {
-  const { app, connections } = await setup(t);
-  const mac1 = await register(app, "user-1", "mac");
-  const windows1 = await register(app, "user-1", "windows");
-  const linux1 = await register(app, "user-1", "linux");
-  const mac2 = await register(app, "user-2", "mac");
-  const windows3 = await register(app, "user-3", "windows");
+test("connections that don't register in time are closed", async (t) => {
+  const { app, connections } = await setup(t, { authTimeoutMs: 50 });
+  const idle = await connect(app);
+  assert.equal(await idle.closed, AUTH_TIMEOUT_CLOSE_CODE);
 
-  assert.deepEqual(devicesOf(connections, "user-1"), ["linux", "mac", "windows"]);
-  assert.deepEqual(devicesOf(connections, "user-2"), ["mac"]);
-  assert.deepEqual(devicesOf(connections, "user-3"), ["windows"]);
-
-  // To the sender's own user: every device except the sender.
-  mac1.send({ type: "message", targetUserId: "user-1", message: "hello" });
-  const fromMac1 = {
-    type: "message",
-    from: { userId: "user-1", deviceId: "mac" },
-    message: "hello",
-  };
-  assert.deepEqual(await windows1.next(), fromMac1);
-  assert.deepEqual(await linux1.next(), fromMac1);
-  // Deliveries are sent before the acknowledgement, so an echo would arrive first.
-  assert.deepEqual(await mac1.next(), { type: "sent", recipients: 2 });
-
-  // To another user: all of their devices.
-  mac2.send({ type: "message", targetUserId: "user-1", message: "from user 2" });
-  const fromMac2 = {
-    type: "message",
-    from: { userId: "user-2", deviceId: "mac" },
-    message: "from user 2",
-  };
-  assert.deepEqual(await mac1.next(), fromMac2);
-  assert.deepEqual(await windows1.next(), fromMac2);
-  assert.deepEqual(await linux1.next(), fromMac2);
-  assert.deepEqual(await mac2.next(), { type: "sent", recipients: 3 });
-
-  windows3.send({ type: "message", targetUserId: "user-2", message: "to user 2" });
-  assert.equal((await mac2.next()).type, "message");
-  assert.deepEqual(await windows3.next(), { type: "sent", recipients: 1 });
-
-  for (const client of [mac1, windows1, linux1, mac2, windows3]) client.socket.terminate();
+  // A registered connection outlives the timeout.
+  const registered = await register(app, "user_A", "mac");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(registered.socket.readyState, registered.socket.OPEN);
+  assert.equal(connections.connectionCount, 1);
+  registered.socket.terminate();
 });
 
-test("a target user with no other connected devices is reported", async (t) => {
+test("test messages reach every other device of the sender's user, and no one else", async (t) => {
+  const { app, connections } = await setup(t);
+  const macA = await register(app, "user_A", "mac");
+  const windowsA = await register(app, "user_A", "windows");
+  const linuxA = await register(app, "user_A", "linux");
+  // A different user may use the same device IDs; they stay separate.
+  const macB = await register(app, "user_B", "mac");
+  const linuxB = await register(app, "user_B", "linux");
+
+  assert.deepEqual(devicesOf(connections, "user_A"), ["linux", "mac", "windows"]);
+  assert.deepEqual(devicesOf(connections, "user_B"), ["linux", "mac"]);
+
+  macA.send({ type: "message", message: "hello" });
+  const fromMacA = {
+    type: "message",
+    from: { userId: "user_A", deviceId: "mac" },
+    message: "hello",
+  };
+  assert.deepEqual(await windowsA.next(), fromMacA);
+  assert.deepEqual(await linuxA.next(), fromMacA);
+  // Deliveries are sent before the acknowledgement, so an echo would arrive first.
+  assert.deepEqual(await macA.next(), { type: "sent", recipients: 2 });
+
+  macB.send({ type: "message", message: "from B" });
+  assert.deepEqual(await linuxB.next(), {
+    type: "message",
+    from: { userId: "user_B", deviceId: "mac" },
+    message: "from B",
+  });
+  assert.deepEqual(await macB.next(), { type: "sent", recipients: 1 });
+
+  // Naming another user is not possible: the message schema has no target.
+  macB.send({ type: "message", targetUserId: "user_A", message: "sneaky" });
+  const refused = await macB.next();
+  assert.equal(refused.type === "error" && refused.code, "invalid_message");
+
+  // User A's devices got nothing from user B: their next message is this one.
+  windowsA.send({ type: "message", message: "check" });
+  assert.equal((await macA.next()).type, "message");
+  assert.deepEqual(await linuxA.next(), {
+    type: "message",
+    from: { userId: "user_A", deviceId: "windows" },
+    message: "check",
+  });
+
+  for (const client of [macA, windowsA, linuxA, macB, linuxB]) client.socket.terminate();
+});
+
+test("a user with no other connected devices is reported", async (t) => {
   const { app } = await setup(t);
-  const mac = await register(app, "user-1", "mac");
+  const mac = await register(app, "user_A", "mac");
+  await register(app, "user_B", "mac");
 
-  mac.send({ type: "message", targetUserId: "nobody", message: "hello" });
-  const unknown = await mac.next();
-  assert.equal(unknown.type === "error" && unknown.code, "target_unavailable");
-
-  // Being the user's only device means there's nobody to send to either.
-  mac.send({ type: "message", targetUserId: "user-1", message: "hello" });
+  mac.send({ type: "message", message: "hello" });
   const alone = await mac.next();
-  assert.equal(alone.type === "error" && alone.code, "target_unavailable");
+  assert.equal(alone.type === "error" && alone.code, "no_other_devices");
   mac.socket.terminate();
 });
 
 test("a disconnect removes only that connection, and the device can reconnect", async (t) => {
   const { app, connections } = await setup(t);
-  const mac = await register(app, "user-1", "mac");
-  const windows = await register(app, "user-1", "windows");
-  const linux = await register(app, "user-1", "linux");
+  const mac = await register(app, "user_A", "mac");
+  const windows = await register(app, "user_A", "windows");
+  const linux = await register(app, "user_A", "linux");
 
   // Abnormal termination (no close handshake) is cleaned up like a normal close.
   linux.socket.terminate();
   await eventually(() => connections.connectionCount === 2);
-  assert.deepEqual(devicesOf(connections, "user-1"), ["mac", "windows"]);
+  assert.deepEqual(devicesOf(connections, "user_A"), ["mac", "windows"]);
 
   // The remaining devices still talk to each other.
-  mac.send({ type: "message", targetUserId: "user-1", message: "still here" });
+  mac.send({ type: "message", message: "still here" });
   assert.equal((await windows.next()).type, "message");
   assert.deepEqual(await mac.next(), { type: "sent", recipients: 1 });
 
-  const linuxAgain = await register(app, "user-1", "linux");
-  assert.deepEqual(devicesOf(connections, "user-1"), ["linux", "mac", "windows"]);
+  const linuxAgain = await register(app, "user_A", "linux");
+  assert.deepEqual(devicesOf(connections, "user_A"), ["linux", "mac", "windows"]);
 
   // `terminate()` rather than `close()`: `injectWS` sockets don't finish the close handshake with
   // the server, so a clean close only reaches it after ws's 30 s timeout. Over TCP both paths
@@ -252,20 +314,48 @@ test("a disconnect removes only that connection, and the device can reconnect", 
 
 test("a device that registers again replaces its previous connection", async (t) => {
   const { app, connections } = await setup(t);
-  const sender = await register(app, "user-2", "mac");
-  const first = await register(app, "user-1", "mac");
-  const second = await register(app, "user-1", "mac");
+  const other = await register(app, "user_A", "windows");
+  const first = await register(app, "user_A", "mac");
+  const second = await register(app, "user_A", "mac");
 
   assert.equal(await first.closed, REPLACED_CLOSE_CODE);
-  assert.equal(connections.connectionCount, 2);
-  assert.equal(connections.getConnection(user("user-1"), device("mac"))?.socket.readyState, 1);
+  assert.deepEqual(devicesOf(connections, "user_A"), ["mac", "windows"]);
 
-  sender.send({ type: "message", targetUserId: "user-1", message: "hello" });
+  other.send({ type: "message", message: "hello" });
   assert.equal((await second.next()).type, "message");
-  assert.deepEqual(await sender.next(), { type: "sent", recipients: 1 });
-
-  // The old socket's close didn't remove the new registration.
-  assert.deepEqual(devicesOf(connections, "user-1"), ["mac"]);
-  sender.socket.terminate();
+  assert.deepEqual(await other.next(), { type: "sent", recipients: 1 });
+  other.socket.terminate();
   second.socket.terminate();
+});
+
+test("tokens, secrets, and message contents never reach the logs", async (t) => {
+  const lines: string[] = [];
+  const logStream = new PassThrough();
+  logStream.on("data", (chunk: Buffer) => lines.push(chunk.toString("utf8")));
+  const { app } = await setup(t, { logLevel: "trace", logStream });
+
+  const tokenA = accessToken("user_A");
+  const mac = await connect(app);
+  mac.send({ type: "register", accessToken: tokenA, deviceId: "mac" });
+  assert.equal((await mac.next()).type, "registered");
+  const linux = await register(app, "user_A", "linux");
+  mac.send({ type: "message", message: "top-secret-clipboard-text" });
+  assert.equal((await linux.next()).type, "message");
+
+  const badToken = accessToken("user_A", { untrustedKey: true });
+  await expectRejected(app, badToken);
+  await app.inject({ method: "GET", url: "/auth/config" });
+
+  const log = lines.join("");
+  assert.match(log, /relay connection registered/, "logging was captured");
+  assert.match(log, /relay authentication failed/);
+  for (const secret of [tokenA, badToken, TEST_SECRET_KEY, "top-secret-clipboard-text"]) {
+    assert.ok(!log.includes(secret), "a secret was logged");
+  }
+  // Not even a fragment of a token: signatures are the sensitive part.
+  for (const token of [tokenA, badToken]) {
+    assert.ok(!log.includes(token.split(".")[2] ?? "-"), "a token signature was logged");
+  }
+  mac.socket.terminate();
+  linux.socket.terminate();
 });

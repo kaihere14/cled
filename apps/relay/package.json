@@ -8,13 +8,14 @@
     "node": ">=22.22"
   },
   "scripts": {
-    "dev": "node --watch src/main.ts",
+    "dev": "node --env-file-if-exists=.env --watch src/main.ts",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/main.js",
+    "start": "node --env-file-if-exists=.env dist/main.js",
     "typecheck": "tsc",
     "test": "node --test \"src/**/*.test.ts\""
   },
   "dependencies": {
+    "@clerk/backend": "^3.18.1",
     "@fastify/websocket": "^11.3.1",
     "fastify": "^5.12.5",
     "zod": "^4.6.5"

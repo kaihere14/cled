@@ -1,5 +1,6 @@
 import type { WebSocket } from "@fastify/websocket";
-import type { DeviceId, Identity, UserId } from "./identity.ts";
+import type { UserId } from "../../auth/identity.ts";
+import type { DeviceId, Identity } from "./identity.ts";
 
 /** A registered WebSocket: one device of one user. */
 export interface Connection extends Identity {

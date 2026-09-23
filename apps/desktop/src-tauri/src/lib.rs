@@ -1,3 +1,4 @@
+mod auth;
 mod background;
 mod clipboard;
 mod device;
@@ -10,10 +11,15 @@ use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // TLS for relays and the account service uses rustls with the `ring` provider (see
+    // Cargo.toml). The HTTP client requires it to be installed before it is built.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let app = tauri::Builder::default()
         .plugin(background::single_instance_plugin())
         .plugin(background::autostart_plugin())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let device = device::load_or_create(app.handle());
             let sync = sync::SyncState::start(app.handle(), device);
@@ -24,13 +30,16 @@ pub fn run() {
             );
             app.manage(clipboard);
             let settings = settings::SettingsState::load(app.handle());
+            let auth = auth::AuthState::load();
             let relay = relay::RelayState::start(
                 app.handle(),
                 device,
                 sync::device_name(),
                 &settings.current(),
+                std::sync::Arc::clone(&auth),
             );
             app.manage(settings);
+            app.manage(auth);
             app.manage(relay);
             app.manage(sync);
             background::setup(app)?;
@@ -53,7 +62,10 @@ pub fn run() {
             settings::get_settings,
             settings::set_connection_mode,
             settings::set_relay_url,
-            settings::set_relay_user_id,
+            auth::auth_status,
+            auth::sign_in,
+            auth::cancel_sign_in,
+            auth::sign_out,
             relay::relay_status,
             relay::send_relay_test,
         ])

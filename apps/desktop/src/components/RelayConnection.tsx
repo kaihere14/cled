@@ -8,6 +8,7 @@ import {
   sendRelayTest,
 } from "../lib/ipc";
 import { useTauriEvent } from "../lib/listen";
+import { SecondaryButton } from "./Button";
 
 type Tone = "ok" | "pending" | "warning" | "error";
 
@@ -24,8 +25,8 @@ function describe(status: RelayStatus): { tone: Tone; label: string; detail: str
       return { tone: "ok", label: "Connected", detail: null };
     case "connecting":
       return { tone: "pending", label: "Connecting…", detail: null };
-    case "needsUserId":
-      return { tone: "warning", label: "Enter a user ID to connect", detail: null };
+    case "needsSignIn":
+      return { tone: "warning", label: "Sign in to connect", detail: null };
     case "failed":
       return {
         tone: "error",
@@ -96,15 +97,13 @@ export function RelayConnection() {
           </p>
           {detail && <p className="text-xs break-words text-neutral-500">{detail}</p>}
         </div>
-        <button
-          type="button"
+        <SecondaryButton
           onClick={sendTest}
           disabled={!connected || sending}
-          title="Sends a test message to your other devices with the same user ID."
-          className="shrink-0 rounded-md border border-neutral-200 px-3 py-1 text-sm transition-[scale,background-color,opacity] duration-150 ease-out-strong select-none hover:bg-neutral-100 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-800"
+          title="Sends a test message to your other devices signed in to this account."
         >
           Send test
-        </button>
+        </SecondaryButton>
       </div>
 
       <div aria-live="polite" className="flex flex-col gap-0.5 empty:hidden">

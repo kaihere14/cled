@@ -1,29 +1,46 @@
 import { z } from "zod";
-import { devRegisterMessageSchema } from "./dev-registration.ts";
-import { deviceIdSchema, userIdSchema } from "./identity.ts";
+import { userIdSchema } from "../../auth/identity.ts";
+import { deviceIdSchema } from "./identity.ts";
 
 /*
  * The WebSocket protocol, one JSON object per text frame. Deliberately minimal: it only proves
- * that registered connections can be routed to. It is not the clipboard protocol, which will carry
- * opaque encrypted payloads the relay forwards without reading.
+ * that authenticated connections can be routed to. It is not the clipboard protocol, which will
+ * carry opaque encrypted payloads the relay forwards without reading.
+ *
+ * Zod checks the shape of messages here. Whether an access token is genuine is the
+ * `AuthVerifier`'s job, not this file's.
  */
 
 /** Longest test message accepted. Test messages are small strings, not clipboard content. */
 export const MAX_TEST_MESSAGE_LENGTH = 4096;
 
+/** Generous upper bound for an access token; real ones are around 1 KiB. */
+export const MAX_ACCESS_TOKEN_LENGTH = 8192;
+
 /**
- * TEMPORARY. Sent to every other connected device of `targetUserId`. Exists only to prove routing
- * works; it will be replaced by the encrypted clipboard payload.
+ * The first message on every connection. The user comes only from the verified access token, so
+ * there is deliberately no `userId` field; a message that includes one is rejected rather than
+ * silently ignored, so a client can't believe it chose its user.
  */
-const testMessageSchema = z.object({
+const registerMessageSchema = z.strictObject({
+  type: z.literal("register"),
+  accessToken: z.string().min(1).max(MAX_ACCESS_TOKEN_LENGTH),
+  deviceId: deviceIdSchema,
+});
+
+/**
+ * TEMPORARY. Sent to every other connected device of the sender's own user. Exists only to prove
+ * routing works; it will be replaced by the encrypted clipboard payload. There is no target: a
+ * device can only ever reach its own user's devices.
+ */
+const testMessageSchema = z.strictObject({
   type: z.literal("message"),
-  targetUserId: userIdSchema,
   message: z.string().max(MAX_TEST_MESSAGE_LENGTH),
 });
 
 /** Anything a client may send. */
 export const clientMessageSchema = z.discriminatedUnion("type", [
-  devRegisterMessageSchema,
+  registerMessageSchema,
   testMessageSchema,
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
@@ -33,12 +50,17 @@ export const errorCodeSchema = z.enum([
   "invalid_json",
   /** Valid JSON, but not a message this relay understands. */
   "invalid_message",
+  /**
+   * The access token was missing, malformed, invalid, expired, or not for this relay. Always sent
+   * with the same message, whatever the reason; the connection is then closed.
+   */
+  "unauthorized",
   /** Only `register` is accepted before registration succeeds. */
   "not_registered",
   /** A connection registers once. */
   "already_registered",
-  /** The target user has no connected devices other than the sender. */
-  "target_unavailable",
+  /** The sender's user has no other devices connected. */
+  "no_other_devices",
   /** The relay failed unexpectedly. Details are logged, never sent. */
   "internal_error",
 ]);

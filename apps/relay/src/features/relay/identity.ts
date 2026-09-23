@@ -1,31 +1,16 @@
-import { z } from "zod";
+import type { z } from "zod";
+import { identifierSchema, type UserId } from "../../auth/identity.ts";
 
 /**
- * Shape shared by user and device IDs: 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`.
- * Restricting the character set keeps IDs safe to log and compare.
- */
-const identifierSchema = z
-  .string()
-  .regex(
-    /^[A-Za-z0-9._:-]{1,128}$/,
-    "must be 1-128 characters of A-Z, a-z, 0-9, '.', '_', ':', '-'",
-  );
-
-/** A Cled account. One user can have many devices connected at once. */
-export const userIdSchema = identifierSchema.brand<"UserId">();
-export type UserId = z.infer<typeof userIdSchema>;
-
-/**
- * One installation of Cled. Only unique within its user: two users may both have a device
- * called `macbook`. The two ID types are branded so one can't be passed where the other belongs.
+ * One installation of Cled. Chosen by the device itself and only unique within its user: two
+ * users may both have a device called `macbook`. Branded so it can't be mixed up with a `UserId`.
  */
 export const deviceIdSchema = identifierSchema.brand<"DeviceId">();
 export type DeviceId = z.infer<typeof deviceIdSchema>;
 
 /**
- * Who a connection belongs to. The connection registry and routing only depend on this, not on
- * how it was established, so the development registration in `dev-registration.ts` can be
- * replaced by real authentication without touching them.
+ * Who a connection belongs to: the verified user plus the device it says it is. The connection
+ * registry and routing only depend on this, not on how the user was authenticated.
  */
 export interface Identity {
   readonly userId: UserId;

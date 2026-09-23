@@ -71,8 +71,6 @@ export type Settings = {
   /** In relay mode the app connects to the relay, but clipboard items still sync over LAN only. */
   connectionMode: ConnectionMode;
   relayUrl: string;
-  /** TEMPORARY testing ID: devices with the same one join the same relay user. Empty if unset. */
-  relayUserId: string;
 };
 
 export type ConnectionMode = "lan" | "relay";
@@ -90,15 +88,43 @@ export function setRelayUrl(url: string): Promise<Settings> {
   return invoke("set_relay_url", { url });
 }
 
-/** Rejects with a message for the user if the ID isn't one the relay accepts. */
-export function setRelayUserId(userId: string): Promise<Settings> {
-  return invoke("set_relay_user_id", { userId });
+/** Mirrors `AuthStatus` in `src-tauri/src/auth.rs`. Tokens never reach the UI. */
+export type AuthStatus =
+  | { state: "signedOut" }
+  /** Waiting for the user to finish in the browser. */
+  | { state: "signingIn" }
+  | { state: "signedIn"; account: Account };
+
+export type Account = { userId: string; email: string | null; name: string | null };
+
+export function authStatus(): Promise<AuthStatus> {
+  return invoke("auth_status");
+}
+
+export function onAuthChanged(handler: (status: AuthStatus) => void): Promise<UnlistenFn> {
+  return listen<AuthStatus>("auth:changed", (event) => handler(event.payload));
+}
+
+/**
+ * Opens the browser to sign in with the saved relay's account service. Resolves once the user
+ * finishes; rejects with a message for the user if it fails, times out, or is cancelled.
+ */
+export function signIn(): Promise<AuthStatus> {
+  return invoke("sign_in");
+}
+
+export function cancelSignIn(): Promise<void> {
+  return invoke("cancel_sign_in");
+}
+
+export function signOut(): Promise<AuthStatus> {
+  return invoke("sign_out");
 }
 
 /** Mirrors `RelayStatus` in `src-tauri/src/relay.rs`. */
 export type RelayStatus =
   | { state: "off" }
-  | { state: "needsUserId" }
+  | { state: "needsSignIn" }
   | { state: "connecting" }
   | { state: "connected" }
   /** `retryInSecs` is `null` when Cled won't retry until the settings change. */
@@ -112,12 +138,12 @@ export function onRelayChanged(handler: (status: RelayStatus) => void): Promise<
   return listen<RelayStatus>("relay:changed", (event) => handler(event.payload));
 }
 
-/** TEMPORARY. Resolves to how many other devices received the test message. */
+/** TEMPORARY. Resolves to how many of this account's other devices received the test message. */
 export function sendRelayTest(): Promise<number> {
   return invoke("send_relay_test");
 }
 
-/** A test message from another device of the same relay user. */
+/** A test message from another device signed in to the same account. */
 export type RelayMessage = { fromDeviceId: string; message: string };
 
 export function onRelayMessage(handler: (message: RelayMessage) => void): Promise<UnlistenFn> {

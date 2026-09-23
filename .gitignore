@@ -16,3 +16,8 @@ apps/desktop/src-tauri/gen/schemas
 !.vscode/extensions.json
 .DS_Store
 *.sw?
+
+# Local environment files hold secrets (e.g. the relay's Clerk keys).
+.env
+.env.*
+!.env.example

@@ -10,3 +10,17 @@ export function Button({ className = "", ...props }: ButtonHTMLAttributes<HTMLBu
     />
   );
 }
+
+/** Outlined button for secondary actions. Same press feedback as `Button`. */
+export function SecondaryButton({
+  className = "",
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      type="button"
+      className={`shrink-0 rounded-md border border-neutral-200 px-3 py-1 text-sm transition-[scale,background-color,opacity] duration-150 ease-out-strong select-none hover:bg-neutral-100 active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-800 ${className}`}
+      {...props}
+    />
+  );
+}

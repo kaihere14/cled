@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { WebSocket } from "@fastify/websocket";
-import type { DeviceId, UserId } from "./identity.ts";
+import type { UserId } from "../../auth/identity.ts";
+import type { DeviceId } from "./identity.ts";
 import { type Connection, ConnectionRegistry } from "./registry.ts";
 
 // The registry never touches the socket, so any unique object stands in for one.

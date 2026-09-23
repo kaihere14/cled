@@ -5,9 +5,9 @@ import {
   type Settings,
   setConnectionMode,
   setRelayUrl,
-  setRelayUserId,
 } from "../lib/ipc";
 import { Button } from "./Button";
+import { RelayAccount } from "./RelayAccount";
 import { RelayConnection } from "./RelayConnection";
 import { SegmentedControl } from "./SegmentedControl";
 
@@ -17,8 +17,7 @@ const MODES: { value: ConnectionMode; label: string }[] = [
 ];
 
 /**
- * Connection mode, relay connection status, relay URL, and the temporary relay user ID, as rows
- * of the Settings card. In relay mode the app connects to the relay, but clipboard items still
+ * Connection mode, relay connection status, account, and relay URL, as rows of the Settings card. In relay mode the app connects to the relay, but clipboard items still
  * sync over the local network only, and the UI says so.
  */
 export function ConnectionSettings({ onError }: { onError: (error: string | null) => void }) {
@@ -69,6 +68,7 @@ export function ConnectionSettings({ onError }: { onError: (error: string | null
       {mode === "relay" && settings && (
         <div className="flex flex-col transition-opacity duration-200 ease-out-strong starting:opacity-0">
           <RelayConnection />
+          <RelayAccount />
           <div className="flex flex-col gap-3 px-3 pt-1 pb-2.5">
             <SavedField
               id="relay-url"
@@ -80,19 +80,6 @@ export function ConnectionSettings({ onError }: { onError: (error: string | null
                 return next.relayUrl;
               }}
               inputProps={{ type: "url", inputMode: "url" }}
-            />
-            <SavedField
-              id="relay-user-id"
-              label="User ID"
-              badge="Testing"
-              hint="Temporary, until Cled has accounts. Devices with the same ID connect as the same user. It isn't a password: anyone who knows it can join."
-              placeholder="e.g. arman-test"
-              saved={settings.relayUserId}
-              save={async (draft) => {
-                const next = await setRelayUserId(draft);
-                setSettings(next);
-                return next.relayUserId;
-              }}
             />
             <p className="text-xs text-amber-700 dark:text-amber-300">
               Clipboard items don't go through the relay yet. Until they do, Cled keeps syncing them
@@ -112,18 +99,12 @@ export function ConnectionSettings({ onError }: { onError: (error: string | null
 function SavedField({
   id,
   label,
-  badge,
-  hint,
-  placeholder,
   saved,
   save,
   inputProps,
 }: {
   id: string;
   label: string;
-  badge?: string;
-  hint?: string;
-  placeholder?: string;
   saved: string;
   /** Saves the draft and resolves to the stored value; rejects with a message for the user. */
   save: (draft: string) => Promise<string>;
@@ -146,17 +127,10 @@ function SavedField({
     }
   }
 
-  const describedBy = error ? `${id}-error` : hint ? `${id}-hint` : undefined;
-
   return (
     <form onSubmit={submit} noValidate className="flex flex-col gap-2">
-      <label htmlFor={id} className="flex items-center gap-2 text-sm">
+      <label htmlFor={id} className="text-sm">
         {label}
-        {badge && (
-          <span className="rounded bg-amber-100 px-1.5 py-px text-[11px] font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-            {badge}
-          </span>
-        )}
       </label>
       <div className="flex gap-2">
         <input
@@ -165,7 +139,6 @@ function SavedField({
           spellCheck={false}
           autoComplete="off"
           autoCapitalize="off"
-          placeholder={placeholder}
           {...inputProps}
           value={draft}
           onChange={(event) => {
@@ -173,23 +146,17 @@ function SavedField({
             setError(null);
           }}
           aria-invalid={error !== null}
-          aria-describedby={describedBy}
+          aria-describedby={error ? `${id}-error` : undefined}
           className="min-w-0 flex-1 rounded-md border border-neutral-200 bg-white px-3 py-1.5 font-mono text-sm outline-none placeholder:text-neutral-400 focus-visible:border-neutral-400 aria-invalid:border-red-400 dark:border-neutral-800 dark:bg-neutral-900 dark:focus-visible:border-neutral-600 dark:aria-invalid:border-red-500"
         />
         <Button type="submit" disabled={saving || draft === saved}>
           Save
         </Button>
       </div>
-      {error ? (
+      {error && (
         <p id={`${id}-error`} className="text-xs text-red-600 dark:text-red-400">
           {error}
         </p>
-      ) : (
-        hint && (
-          <p id={`${id}-hint`} className="text-xs text-neutral-500">
-            {hint}
-          </p>
-        )
       )}
     </form>
   );

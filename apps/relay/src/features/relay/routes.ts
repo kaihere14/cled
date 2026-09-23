@@ -1,8 +1,13 @@
 import type { WebSocket } from "@fastify/websocket";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
-import { identityFromDevRegistration } from "./dev-registration.ts";
-import type { Identity } from "./identity.ts";
-import { errorMessage, parseClientMessage, type ServerMessage } from "./protocol.ts";
+import type { AuthVerifier } from "../../auth/identity.ts";
+import type { DeviceId } from "./identity.ts";
+import {
+  type ClientMessage,
+  errorMessage,
+  parseClientMessage,
+  type ServerMessage,
+} from "./protocol.ts";
 import type { ConnectionRegistry } from "./registry.ts";
 
 /**
@@ -17,41 +22,62 @@ export const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024 + 64 * 1024;
 
 /** Close code sent to a connection whose device registered again on a newer connection. */
 export const REPLACED_CLOSE_CODE = 4001;
+/** Close code after a rejected access token. The client should refresh it or sign in again. */
+export const UNAUTHORIZED_CLOSE_CODE = 4401;
+/** Close code for a connection that didn't register in time. */
+export const AUTH_TIMEOUT_CLOSE_CODE = 4408;
+
+/** How long a new connection has to register before it's closed. */
+export const DEFAULT_AUTH_TIMEOUT_MS = 10_000;
 
 export interface RelayRoutesOptions {
   connections: ConnectionRegistry;
+  verifier: AuthVerifier;
+  authTimeoutMs?: number;
 }
 
 /**
  * `GET /relay` (WebSocket): where devices connect to reach their user's other devices.
  *
- * A connection starts unregistered and can only send `register`. Once registered it can send test
- * messages, which go to every other connected device of the target user. Closing, cleanly or not,
- * removes exactly that connection.
+ * A connection starts unauthenticated and can only send `register`, with an access token and its
+ * device ID. The user is whoever the verified token says; the client never names it. Only then is
+ * the connection added to the registry. A rejected token closes the connection, and so does not
+ * registering within `authTimeoutMs`.
  *
- * Message contents are never logged: only sizes, IDs, and counts. Clients never see internal
- * error details.
+ * Once registered, a connection can send test messages, which go to every other connected device
+ * of its own user. Closing, cleanly or not, removes exactly that connection.
+ *
+ * Never logged: access tokens and message contents (only sizes, IDs, counts, and failure
+ * reasons). Clients never see internal error details or why a token was rejected.
  */
 export async function relayRoutes(
   app: FastifyInstance,
-  { connections }: RelayRoutesOptions,
+  { connections, verifier, authTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS }: RelayRoutesOptions,
 ): Promise<void> {
   app.get("/relay", { websocket: true }, (socket, request) => {
     const log = request.log;
     log.info("relay connection opened");
 
+    const state: ConnectionState = { authenticating: false };
+    const authTimer = setTimeout(() => {
+      if (!connections.getBySocket(socket)) {
+        log.info("relay connection closed: no registration in time");
+        socket.close(AUTH_TIMEOUT_CLOSE_CODE, "registration timed out");
+      }
+    }, authTimeoutMs);
+
+    const context: FrameContext = { connections, verifier, socket, log, state, authTimer };
     socket.on("message", (data: Buffer, isBinary: boolean) => {
       // A throwing listener would crash the process, so nothing escapes this handler.
-      try {
-        handleFrame(connections, socket, data, isBinary, log);
-      } catch (error) {
-        log.error(error, "relay message handling failed");
+      handleFrame(context, data, isBinary).catch((error: unknown) => {
+        log.error({ err: error }, "relay message handling failed");
         send(socket, errorMessage("internal_error", "the relay could not process the message"));
-      }
+      });
     });
 
     // Fires for clean closes and abnormal ones (code 1006) alike, after `error` if there was one.
     socket.on("close", (code: number) => {
+      clearTimeout(authTimer);
       const removed = connections.removeBySocket(socket);
       log.info(
         removed ? { code, userId: removed.userId, deviceId: removed.deviceId } : { code },
@@ -64,13 +90,22 @@ export async function relayRoutes(
   });
 }
 
-function handleFrame(
-  connections: ConnectionRegistry,
-  socket: WebSocket,
-  data: Buffer,
-  isBinary: boolean,
-  log: FastifyBaseLogger,
-): void {
+interface ConnectionState {
+  /** A token is being verified; further `register` messages are refused meanwhile. */
+  authenticating: boolean;
+}
+
+interface FrameContext {
+  connections: ConnectionRegistry;
+  verifier: AuthVerifier;
+  socket: WebSocket;
+  log: FastifyBaseLogger;
+  state: ConnectionState;
+  authTimer: NodeJS.Timeout;
+}
+
+async function handleFrame(context: FrameContext, data: Buffer, isBinary: boolean) {
+  const { connections, socket, log } = context;
   const parsed = parseClientMessage(data, isBinary);
   if (!parsed.ok) {
     log.debug({ bytes: data.length, code: parsed.error.code }, "relay message rejected");
@@ -85,11 +120,11 @@ function handleFrame(
 
   switch (message.type) {
     case "register": {
-      if (sender) {
+      if (sender || context.state.authenticating) {
         send(socket, errorMessage("already_registered", "this connection is already registered"));
         return;
       }
-      register(connections, socket, identityFromDevRegistration(message), log);
+      await register(context, message);
       return;
     }
     case "message": {
@@ -98,13 +133,10 @@ function handleFrame(
         return;
       }
       const recipients = connections
-        .getUserConnections(message.targetUserId)
+        .getUserConnections(sender.userId)
         .filter((connection) => connection !== sender);
       if (recipients.length === 0) {
-        send(
-          socket,
-          errorMessage("target_unavailable", "the target user has no other devices connected"),
-        );
+        send(socket, errorMessage("no_other_devices", "no other devices are connected"));
         return;
       }
       const delivery: ServerMessage = {
@@ -117,7 +149,7 @@ function handleFrame(
       }
       send(socket, { type: "sent", recipients: recipients.length });
       log.debug(
-        { bytes: data.length, recipients: recipients.length, targetUserId: message.targetUserId },
+        { bytes: data.length, recipients: recipients.length, userId: sender.userId },
         "relay test message forwarded",
       );
       return;
@@ -125,12 +157,32 @@ function handleFrame(
   }
 }
 
-function register(
-  connections: ConnectionRegistry,
-  socket: WebSocket,
-  identity: Identity,
-  log: FastifyBaseLogger,
-): void {
+async function register(
+  { connections, verifier, socket, log, state, authTimer }: FrameContext,
+  message: Extract<ClientMessage, { type: "register" }>,
+): Promise<void> {
+  const deviceId: DeviceId = message.deviceId;
+
+  state.authenticating = true;
+  let result: Awaited<ReturnType<AuthVerifier["verify"]>>;
+  try {
+    result = await verifier.verify(message.accessToken);
+  } finally {
+    state.authenticating = false;
+  }
+
+  if (!result.ok) {
+    log.info({ reason: result.reason, deviceId }, "relay authentication failed");
+    send(socket, errorMessage("unauthorized", "Authentication failed"));
+    socket.close(UNAUTHORIZED_CLOSE_CODE, "unauthorized");
+    return;
+  }
+  // The client may have gone away while the token was being verified. A closed socket must never
+  // enter the registry: its close event has already fired, so nothing would remove it.
+  if (socket.readyState !== socket.OPEN) return;
+
+  clearTimeout(authTimer);
+  const identity = { userId: result.identity.userId, deviceId };
   const replaced = connections.add({ ...identity, socket });
   if (replaced) {
     // Already out of the registry, so its close event won't remove the new connection.

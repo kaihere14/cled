@@ -1,5 +1,5 @@
-//! User settings stored in `<config dir>/settings.json`: the connection mode, relay URL, and the
-//! temporary relay user ID.
+//! User settings stored in `<config dir>/settings.json`: the connection mode and relay URL.
+//! (Who is signed in isn't a setting; see `auth.rs`.)
 //!
 //! In relay mode the app connects to the relay (see `relay.rs`), but clipboard items don't go
 //! through it yet: LAN sync runs as before whichever mode is selected.
@@ -25,9 +25,6 @@ pub const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:8787";
 pub struct Settings {
     pub connection_mode: ConnectionMode,
     pub relay_url: String,
-    /// TEMPORARY, for testing the relay before accounts exist: devices that enter the same ID
-    /// connect as the same user. Empty until set. Not a secret and not authenticated.
-    pub relay_user_id: String,
 }
 
 impl Default for Settings {
@@ -35,7 +32,6 @@ impl Default for Settings {
         Self {
             connection_mode: ConnectionMode::Lan,
             relay_url: DEFAULT_RELAY_URL.into(),
-            relay_user_id: String::new(),
         }
     }
 }
@@ -67,25 +63,6 @@ pub fn validate_relay_url(input: &str) -> Result<String, String> {
     }
 }
 
-/// Checks that `input` is an ID the relay accepts (1-128 of `A-Z a-z 0-9 . _ : -`, see
-/// `apps/relay/src/features/relay/identity.ts`), and returns it trimmed. The error is shown to the
-/// user as is.
-pub fn validate_relay_user_id(input: &str) -> Result<String, String> {
-    let input = input.trim();
-    if input.is_empty() {
-        return Err("Enter a user ID.".into());
-    }
-    let valid = input.len() <= 128
-        && input
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
-    if valid {
-        Ok(input.to_owned())
-    } else {
-        Err("Use up to 128 letters, digits, and . _ : - (no spaces).".into())
-    }
-}
-
 /// Loads settings from `path`. A missing, unreadable, or invalid file gives the defaults, and an
 /// invalid relay URL (e.g. edited by hand) is replaced by the default.
 fn load(path: &Path) -> Settings {
@@ -105,11 +82,6 @@ fn load(path: &Path) -> Settings {
     };
     if validate_relay_url(&settings.relay_url).is_err() {
         settings.relay_url = DEFAULT_RELAY_URL.into();
-    }
-    if !settings.relay_user_id.is_empty()
-        && validate_relay_user_id(&settings.relay_user_id).is_err()
-    {
-        settings.relay_user_id = String::new();
     }
     settings
 }
@@ -205,20 +177,6 @@ pub fn set_relay_url(
     Ok(settings)
 }
 
-/// Validates and saves the temporary relay user ID. An invalid ID is rejected and the saved one
-/// kept.
-#[tauri::command(async)]
-pub fn set_relay_user_id(
-    state: State<'_, SettingsState>,
-    relay: State<'_, RelayState>,
-    user_id: String,
-) -> Result<Settings, String> {
-    let user_id = validate_relay_user_id(&user_id)?;
-    let settings = state.update(|settings| settings.relay_user_id = user_id)?;
-    relay.configure(&settings);
-    Ok(settings)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,18 +195,6 @@ mod tests {
         let settings = state_in(dir.path()).lock().clone();
         assert_eq!(settings.connection_mode, ConnectionMode::Lan);
         assert_eq!(settings.relay_url, DEFAULT_RELAY_URL);
-        assert_eq!(settings.relay_user_id, "");
-    }
-
-    #[test]
-    fn relay_user_ids_match_what_the_relay_accepts() {
-        for id in ["user-1", "arman", "a.b_c:d-E9", &"u".repeat(128)] {
-            assert_eq!(validate_relay_user_id(id).unwrap(), id);
-        }
-        assert_eq!(validate_relay_user_id("  me \n").unwrap(), "me");
-        for id in ["", "   ", "user 1", "user/1", "ünï", &"u".repeat(129)] {
-            assert!(validate_relay_user_id(id).is_err(), "accepted {id:?}");
-        }
     }
 
     #[test]
@@ -338,15 +284,23 @@ mod tests {
         fs::write(&path, "not json").unwrap();
         assert_eq!(load(&path), Settings::default());
 
+        fs::write(&path, r#"{"connectionMode":"relay","relayUrl":"nonsense"}"#).unwrap();
+        let settings = load(&path);
+        assert_eq!(settings.connection_mode, ConnectionMode::Relay);
+        assert_eq!(settings.relay_url, DEFAULT_RELAY_URL);
+
+        // From the version that had a manually entered relay user ID: that setting is dropped.
         fs::write(
             &path,
-            r#"{"connectionMode":"relay","relayUrl":"nonsense","relayUserId":"bad id"}"#,
+            r#"{"connectionMode":"relay","relayUserId":"someone"}"#,
         )
         .unwrap();
         let settings = load(&path);
         assert_eq!(settings.connection_mode, ConnectionMode::Relay);
-        assert_eq!(settings.relay_url, DEFAULT_RELAY_URL);
-        assert_eq!(settings.relay_user_id, "");
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap().get("relayUserId"),
+            None
+        );
     }
 
     #[test]
@@ -357,7 +311,6 @@ mod tests {
             serde_json::json!({
                 "connectionMode": "lan",
                 "relayUrl": DEFAULT_RELAY_URL,
-                "relayUserId": "",
             })
         );
     }
