@@ -25,6 +25,11 @@ gethostname = "1"
 # PNG only, for UI thumbnails. Already compiled in via arboard's image support.
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", windows))'.dependencies]
 tauri-plugin-autostart = "2.5"

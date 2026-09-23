@@ -260,6 +260,9 @@ and the network:
 | `pairable_devices` | UI → Rust | `[{ id, name, address }]`: devices currently showing a code |
 | `pair_with(address, code)` | UI → Rust | Paired device's name, or error string |
 | `remove_peer(id)` | UI → Rust | `void` or error string |
+| `get_settings` | UI → Rust | `{ connectionMode: "lan" \| "relay", relayUrl }` |
+| `set_connection_mode(mode)` | UI → Rust | Updated settings, or error string |
+| `set_relay_url(url)` | UI → Rust | Updated settings, or an error string for the user if the URL isn't `http(s)://` with a host |
 | `clipboard:changed` | Rust → UI | `{ item: { id, origin } \| null, content: ClipboardPayload }` |
 | `sync:changed` | Rust → UI | Paired devices or their status changed; call `sync_status` |
 | `sync:pairing-code` | Rust → UI | Replacement pairing code, or `null` when it expired |
@@ -297,6 +300,17 @@ plugin's JavaScript API, so the UI needs no extra permissions.
 Without a tray host, a hidden window can still be brought back by launching Cled again.
 
 History shown in the UI is in memory only and disappears when the app closes.
+
+### Settings
+
+`src-tauri/src/settings.rs` stores the connection mode (`lan` by default) and the relay URL
+(default `http://127.0.0.1:8787`, the local relay from `pnpm relay`) in
+`<config dir>/settings.json`, written atomically. Missing fields, a missing file, or a damaged
+file fall back to the defaults, so older installations need no migration. The relay URL is
+validated in Rust before it is saved; an invalid one is rejected and the saved one kept.
+
+Relay sync isn't implemented yet. The mode is only stored: LAN sync runs as before in either
+mode, and the UI says so when Relay is selected.
 
 ## Relay server (early development)
 

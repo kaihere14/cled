@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { getAutostart, quitApp, setAutostart } from "../lib/ipc";
+import { ConnectionSettings } from "./ConnectionSettings";
 import { Section } from "./Section";
 import { Switch } from "./Switch";
 
@@ -28,6 +29,7 @@ export function Settings() {
   return (
     <Section title="Settings">
       <div className="divide-y divide-neutral-200 rounded-lg border border-neutral-200 bg-white dark:divide-neutral-800 dark:border-neutral-800 dark:bg-neutral-900">
+        <ConnectionSettings onError={setError} />
         <Row
           title="Start Cled when you log in"
           description="Starts in the tray, without opening this window."

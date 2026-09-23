@@ -2,6 +2,7 @@ mod background;
 mod clipboard;
 mod device;
 mod preview;
+mod settings;
 mod sync;
 
 use tauri::{Manager, RunEvent};
@@ -21,6 +22,7 @@ pub fn run() {
                 sync.node().cloned(),
             );
             app.manage(clipboard);
+            app.manage(settings::SettingsState::load(app.handle()));
             app.manage(sync);
             background::setup(app)?;
             Ok(())
@@ -39,6 +41,9 @@ pub fn run() {
             sync::pairable_devices,
             sync::pair_with,
             sync::remove_peer,
+            settings::get_settings,
+            settings::set_connection_mode,
+            settings::set_relay_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

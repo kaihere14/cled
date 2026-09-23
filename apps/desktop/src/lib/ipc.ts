@@ -66,6 +66,28 @@ export function quitApp(): Promise<void> {
   return invoke("quit");
 }
 
+/** Mirrors `Settings` in `src-tauri/src/settings.rs`. Stored in `<config dir>/settings.json`. */
+export type Settings = {
+  /** Relay sync isn't implemented yet; LAN sync runs in either mode. */
+  connectionMode: ConnectionMode;
+  relayUrl: string;
+};
+
+export type ConnectionMode = "lan" | "relay";
+
+export function getSettings(): Promise<Settings> {
+  return invoke("get_settings");
+}
+
+export function setConnectionMode(mode: ConnectionMode): Promise<Settings> {
+  return invoke("set_connection_mode", { mode });
+}
+
+/** Rejects with a message for the user if the URL isn't a valid http(s) URL. */
+export function setRelayUrl(url: string): Promise<Settings> {
+  return invoke("set_relay_url", { url });
+}
+
 export type SyncStatus = {
   /** `null` when sync is running; otherwise why it isn't. */
   unavailable: string | null;

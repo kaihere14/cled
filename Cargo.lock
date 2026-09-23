@@ -663,11 +663,14 @@ dependencies = [
  "gethostname",
  "image",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
