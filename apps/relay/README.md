@@ -1,7 +1,9 @@
 # Cled Relay
 
-> **Status: early development.** The relay doesn't route anything yet, and the desktop app
-> doesn't connect to it. Cled currently syncs only between devices on the same local network.
+> **Status: early development.** The relay routes test messages between connected devices, but
+> has no authentication and doesn't carry clipboard data yet. The desktop app connects to it in
+> relay mode (Settings → Connection → Relay, with a temporary user ID) and can send a test
+> message; clipboard items still sync only between devices on the same local network.
 
 The relay will let Cled devices on different networks reach each other. It's a small,
 self-hostable server that forwards encrypted payloads from one device to another.
@@ -26,10 +28,59 @@ Anyone can run their own relay; nothing about it depends on a hosted service.
 | Endpoint | What it does |
 | --- | --- |
 | `GET /health` | Returns `{ "status": "ok" }`. For load balancers and uptime checks. |
-| `GET /relay` (WebSocket) | Accepts connections and keeps them open. Messages are dropped: routing isn't implemented. Messages over 16 MiB + 64 KiB close the connection (code 1009). |
+| `GET /relay` (WebSocket) | Devices register as a user + device, then exchange test messages with that user's other devices. See [WebSocket protocol](#websocket-protocol). Messages over 16 MiB + 64 KiB close the connection (code 1009). |
 
-Not implemented yet: routing, device authentication, message delivery to offline devices, rate
-limiting, and the wire protocol. These come in later milestones.
+Not implemented yet: authentication, clipboard payloads, delivery to offline devices, heartbeats,
+rate limiting, and running more than one relay instance. These come in later milestones.
+
+## WebSocket protocol
+
+> **Development only.** Devices say who they are and the relay believes them: anyone can claim
+> any user ID. Don't expose a relay to untrusted networks until authentication exists.
+
+A **user** is a Cled account; a **device** is one installation of Cled. One user can have many
+devices connected at once, and each device has at most one connection. Both IDs are 1-128
+characters of `A-Z a-z 0-9 . _ : -`, and a device ID only needs to be unique within its user.
+
+Each message is one JSON object in a text frame.
+
+1. Connect to `/relay`. The connection can only send `register` until registration succeeds.
+2. Register:
+
+   ```json
+   { "type": "register", "userId": "user-1", "deviceId": "macbook" }
+   ```
+
+   The relay replies `{ "type": "registered", "userId": "user-1", "deviceId": "macbook" }`.
+   If that device is already connected, the new connection replaces the old one, which is closed
+   with code `4001`. This lets a device reconnect straight after a network drop.
+3. Send a test message to a user:
+
+   ```json
+   { "type": "message", "targetUserId": "user-1", "message": "hello" }
+   ```
+
+   Every connected device of `user-1` except the sender receives
+   `{ "type": "message", "from": { "userId": "...", "deviceId": "..." }, "message": "hello" }`,
+   and the sender gets `{ "type": "sent", "recipients": 2 }`. The sender is identified by its
+   connection, never by the message. Test messages are at most 4096 characters. They exist only
+   to prove routing and will be replaced by opaque encrypted clipboard payloads.
+4. Closing the connection, cleanly or not, removes only that device. The user's other devices
+   stay connected.
+
+Anything invalid gets `{ "type": "error", "code": "...", "message": "..." }` and the connection
+stays open:
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_json` | Not valid JSON, or a binary frame. |
+| `invalid_message` | Valid JSON, but not a message described above. |
+| `not_registered` | Sent `message` before registering. |
+| `already_registered` | Sent `register` twice on one connection. |
+| `target_unavailable` | The target user has no connected devices other than the sender. |
+| `internal_error` | Something failed in the relay. Details are logged, not sent. |
+
+Connections are kept in memory only; restarting the relay drops them, and devices reconnect.
 
 ## Running it
 
@@ -84,7 +135,12 @@ src/
   config.ts                Environment variables to typed config
   features/
     health/routes.ts       GET /health
-    relay/routes.ts        WebSocket endpoint, future routing
+    relay/
+      routes.ts            WebSocket endpoint: connection lifecycle and routing
+      registry.ts          In-memory connections, grouped by user then device
+      protocol.ts          Zod schemas for every message in and out
+      identity.ts          User and device ID types
+      dev-registration.ts  Development-only identity claim, to be replaced by authentication
 ```
 
 Code is organized by feature. Anything used by only one feature (routes, handlers, helpers) lives

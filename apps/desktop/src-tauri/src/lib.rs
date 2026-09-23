@@ -2,6 +2,7 @@ mod background;
 mod clipboard;
 mod device;
 mod preview;
+mod relay;
 mod settings;
 mod sync;
 
@@ -22,7 +23,15 @@ pub fn run() {
                 sync.node().cloned(),
             );
             app.manage(clipboard);
-            app.manage(settings::SettingsState::load(app.handle()));
+            let settings = settings::SettingsState::load(app.handle());
+            let relay = relay::RelayState::start(
+                app.handle(),
+                device,
+                sync::device_name(),
+                &settings.current(),
+            );
+            app.manage(settings);
+            app.manage(relay);
             app.manage(sync);
             background::setup(app)?;
             Ok(())
@@ -44,6 +53,9 @@ pub fn run() {
             settings::get_settings,
             settings::set_connection_mode,
             settings::set_relay_url,
+            settings::set_relay_user_id,
+            relay::relay_status,
+            relay::send_relay_test,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

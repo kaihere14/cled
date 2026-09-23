@@ -68,9 +68,11 @@ export function quitApp(): Promise<void> {
 
 /** Mirrors `Settings` in `src-tauri/src/settings.rs`. Stored in `<config dir>/settings.json`. */
 export type Settings = {
-  /** Relay sync isn't implemented yet; LAN sync runs in either mode. */
+  /** In relay mode the app connects to the relay, but clipboard items still sync over LAN only. */
   connectionMode: ConnectionMode;
   relayUrl: string;
+  /** TEMPORARY testing ID: devices with the same one join the same relay user. Empty if unset. */
+  relayUserId: string;
 };
 
 export type ConnectionMode = "lan" | "relay";
@@ -86,6 +88,40 @@ export function setConnectionMode(mode: ConnectionMode): Promise<Settings> {
 /** Rejects with a message for the user if the URL isn't a valid http(s) URL. */
 export function setRelayUrl(url: string): Promise<Settings> {
   return invoke("set_relay_url", { url });
+}
+
+/** Rejects with a message for the user if the ID isn't one the relay accepts. */
+export function setRelayUserId(userId: string): Promise<Settings> {
+  return invoke("set_relay_user_id", { userId });
+}
+
+/** Mirrors `RelayStatus` in `src-tauri/src/relay.rs`. */
+export type RelayStatus =
+  | { state: "off" }
+  | { state: "needsUserId" }
+  | { state: "connecting" }
+  | { state: "connected" }
+  /** `retryInSecs` is `null` when Cled won't retry until the settings change. */
+  | { state: "failed"; error: string; retryInSecs: number | null };
+
+export function relayStatus(): Promise<RelayStatus> {
+  return invoke("relay_status");
+}
+
+export function onRelayChanged(handler: (status: RelayStatus) => void): Promise<UnlistenFn> {
+  return listen<RelayStatus>("relay:changed", (event) => handler(event.payload));
+}
+
+/** TEMPORARY. Resolves to how many other devices received the test message. */
+export function sendRelayTest(): Promise<number> {
+  return invoke("send_relay_test");
+}
+
+/** A test message from another device of the same relay user. */
+export type RelayMessage = { fromDeviceId: string; message: string };
+
+export function onRelayMessage(handler: (message: RelayMessage) => void): Promise<UnlistenFn> {
+  return listen<RelayMessage>("relay:message", (event) => handler(event.payload));
 }
 
 export type SyncStatus = {

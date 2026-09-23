@@ -143,7 +143,7 @@ fn emit<S: Serialize + Clone>(app: &AppHandle, event: &str, payload: S) {
 }
 
 /// The computer's hostname, without a domain suffix (e.g. "armans-desktop").
-fn device_name() -> String {
+pub fn device_name() -> String {
     let host = gethostname::gethostname().to_string_lossy().into_owned();
     let short = host.split('.').next().unwrap_or_default().trim();
     if short.is_empty() {

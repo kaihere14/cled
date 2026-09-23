@@ -1,7 +1,8 @@
-//! User settings stored in `<config dir>/settings.json`: the connection mode and relay URL.
+//! User settings stored in `<config dir>/settings.json`: the connection mode, relay URL, and the
+//! temporary relay user ID.
 //!
-//! Relay sync isn't implemented yet. These settings are only stored; LAN sync runs as before
-//! whichever mode is selected.
+//! In relay mode the app connects to the relay (see `relay.rs`), but clipboard items don't go
+//! through it yet: LAN sync runs as before whichever mode is selected.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+
+use crate::relay::RelayState;
 
 const FILE_NAME: &str = "settings.json";
 
@@ -22,6 +25,9 @@ pub const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:8787";
 pub struct Settings {
     pub connection_mode: ConnectionMode,
     pub relay_url: String,
+    /// TEMPORARY, for testing the relay before accounts exist: devices that enter the same ID
+    /// connect as the same user. Empty until set. Not a secret and not authenticated.
+    pub relay_user_id: String,
 }
 
 impl Default for Settings {
@@ -29,6 +35,7 @@ impl Default for Settings {
         Self {
             connection_mode: ConnectionMode::Lan,
             relay_url: DEFAULT_RELAY_URL.into(),
+            relay_user_id: String::new(),
         }
     }
 }
@@ -60,6 +67,25 @@ pub fn validate_relay_url(input: &str) -> Result<String, String> {
     }
 }
 
+/// Checks that `input` is an ID the relay accepts (1-128 of `A-Z a-z 0-9 . _ : -`, see
+/// `apps/relay/src/features/relay/identity.ts`), and returns it trimmed. The error is shown to the
+/// user as is.
+pub fn validate_relay_user_id(input: &str) -> Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("Enter a user ID.".into());
+    }
+    let valid = input.len() <= 128
+        && input
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+    if valid {
+        Ok(input.to_owned())
+    } else {
+        Err("Use up to 128 letters, digits, and . _ : - (no spaces).".into())
+    }
+}
+
 /// Loads settings from `path`. A missing, unreadable, or invalid file gives the defaults, and an
 /// invalid relay URL (e.g. edited by hand) is replaced by the default.
 fn load(path: &Path) -> Settings {
@@ -79,6 +105,11 @@ fn load(path: &Path) -> Settings {
     };
     if validate_relay_url(&settings.relay_url).is_err() {
         settings.relay_url = DEFAULT_RELAY_URL.into();
+    }
+    if !settings.relay_user_id.is_empty()
+        && validate_relay_user_id(&settings.relay_user_id).is_err()
+    {
+        settings.relay_user_id = String::new();
     }
     settings
 }
@@ -116,6 +147,10 @@ impl SettingsState {
         }
     }
 
+    pub fn current(&self) -> Settings {
+        self.lock().clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, Settings> {
         self.settings
             .lock()
@@ -143,19 +178,45 @@ pub fn get_settings(state: State<'_, SettingsState>) -> Settings {
     state.lock().clone()
 }
 
+// Each setter below also tells the relay connection, which connects, disconnects, or reconnects
+// to match the saved settings.
+
 #[tauri::command(async)]
 pub fn set_connection_mode(
     state: State<'_, SettingsState>,
+    relay: State<'_, RelayState>,
     mode: ConnectionMode,
 ) -> Result<Settings, String> {
-    state.update(|settings| settings.connection_mode = mode)
+    let settings = state.update(|settings| settings.connection_mode = mode)?;
+    relay.configure(&settings);
+    Ok(settings)
 }
 
 /// Validates and saves the relay URL. An invalid URL is rejected and the saved one kept.
 #[tauri::command(async)]
-pub fn set_relay_url(state: State<'_, SettingsState>, url: String) -> Result<Settings, String> {
+pub fn set_relay_url(
+    state: State<'_, SettingsState>,
+    relay: State<'_, RelayState>,
+    url: String,
+) -> Result<Settings, String> {
     let url = validate_relay_url(&url)?;
-    state.update(|settings| settings.relay_url = url)
+    let settings = state.update(|settings| settings.relay_url = url)?;
+    relay.configure(&settings);
+    Ok(settings)
+}
+
+/// Validates and saves the temporary relay user ID. An invalid ID is rejected and the saved one
+/// kept.
+#[tauri::command(async)]
+pub fn set_relay_user_id(
+    state: State<'_, SettingsState>,
+    relay: State<'_, RelayState>,
+    user_id: String,
+) -> Result<Settings, String> {
+    let user_id = validate_relay_user_id(&user_id)?;
+    let settings = state.update(|settings| settings.relay_user_id = user_id)?;
+    relay.configure(&settings);
+    Ok(settings)
 }
 
 #[cfg(test)]
@@ -176,6 +237,18 @@ mod tests {
         let settings = state_in(dir.path()).lock().clone();
         assert_eq!(settings.connection_mode, ConnectionMode::Lan);
         assert_eq!(settings.relay_url, DEFAULT_RELAY_URL);
+        assert_eq!(settings.relay_user_id, "");
+    }
+
+    #[test]
+    fn relay_user_ids_match_what_the_relay_accepts() {
+        for id in ["user-1", "arman", "a.b_c:d-E9", &"u".repeat(128)] {
+            assert_eq!(validate_relay_user_id(id).unwrap(), id);
+        }
+        assert_eq!(validate_relay_user_id("  me \n").unwrap(), "me");
+        for id in ["", "   ", "user 1", "user/1", "ünï", &"u".repeat(129)] {
+            assert!(validate_relay_user_id(id).is_err(), "accepted {id:?}");
+        }
     }
 
     #[test]
@@ -265,10 +338,15 @@ mod tests {
         fs::write(&path, "not json").unwrap();
         assert_eq!(load(&path), Settings::default());
 
-        fs::write(&path, r#"{"connectionMode":"relay","relayUrl":"nonsense"}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"connectionMode":"relay","relayUrl":"nonsense","relayUserId":"bad id"}"#,
+        )
+        .unwrap();
         let settings = load(&path);
         assert_eq!(settings.connection_mode, ConnectionMode::Relay);
         assert_eq!(settings.relay_url, DEFAULT_RELAY_URL);
+        assert_eq!(settings.relay_user_id, "");
     }
 
     #[test]
@@ -276,7 +354,11 @@ mod tests {
         let json = serde_json::to_value(Settings::default()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "connectionMode": "lan", "relayUrl": DEFAULT_RELAY_URL })
+            serde_json::json!({
+                "connectionMode": "lan",
+                "relayUrl": DEFAULT_RELAY_URL,
+                "relayUserId": "",
+            })
         );
     }
 }
