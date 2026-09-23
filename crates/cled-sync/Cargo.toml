@@ -1,0 +1,11 @@
+[package]
+name = "cled-sync"
+description = "Clipboard items and sync rules (loop prevention, deduplication) for Cled"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+blake3 = "1.8"
+cled-clipboard = { path = "../cled-clipboard" }
+uuid = { version = "1.18", features = ["v4", "v7"] }

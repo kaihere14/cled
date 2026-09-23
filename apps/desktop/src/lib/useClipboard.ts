@@ -3,15 +3,22 @@ import {
   type ClipboardPayload,
   type ClipboardStatus,
   clipboardStatus,
+  type ItemOrigin,
   onClipboardChanged,
   readClipboard,
   writeClipboard,
 } from "./ipc";
 
-export type HistoryEntry = { id: number; payload: ClipboardPayload; copiedAt: Date };
+export type HistoryEntry = {
+  /** Clipboard item ID, or a local key for skipped content. */
+  key: string;
+  origin: ItemOrigin | null;
+  payload: ClipboardPayload;
+  copiedAt: Date;
+};
 
 const HISTORY_LIMIT = 50;
-let nextId = 0;
+let nextLocalKey = 0;
 
 /** Current clipboard, in-memory history of changes seen this session, and a way to write. */
 export function useClipboard() {
@@ -23,7 +30,7 @@ export function useClipboard() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
-    onClipboardChanged((payload) => {
+    onClipboardChanged(({ item, content: payload }) => {
       setCurrent(payload);
       setHistory((entries) => {
         // Re-copying text already in history moves it to the top instead of duplicating it.
@@ -31,7 +38,12 @@ export function useClipboard() {
           payload.kind === "text"
             ? entries.filter((e) => !(e.payload.kind === "text" && e.payload.text === payload.text))
             : entries;
-        const entry = { id: nextId++, payload, copiedAt: new Date() };
+        const entry = {
+          key: item?.id ?? `local-${nextLocalKey++}`,
+          origin: item?.origin ?? null,
+          payload,
+          copiedAt: new Date(),
+        };
         return [entry, ...rest].slice(0, HISTORY_LIMIT);
       });
     }).then((fn) => {

@@ -15,7 +15,10 @@ crates/cled-clipboard      Rust library, no Tauri dependency
   ClipboardService         background thread: owns the clipboard, reacts to change
                            notifications (or polls), reports changes
      │
-apps/desktop/src-tauri     Tauri glue only: commands, events, payload types
+crates/cled-sync           Pure logic: clipboard items, device IDs, content hashes, and the
+     │                     SyncEngine rules (echo suppression, dedup, newest wins)
+     │
+apps/desktop/src-tauri     Tauri glue only: commands, events, payload types, device ID file
      │   commands: clipboard_status, read_clipboard, write_clipboard
      │   event:    clipboard:changed
      │
@@ -157,6 +160,47 @@ Windows and macOS keep clipboard content themselves, so no holder is started the
 Known gap: if the clipboard is cleared rather than replaced, the holder keeps running until the
 next copy.
 
+## cled-sync
+
+No networking, no OS calls. It decides what a device should broadcast and what it should write
+to its clipboard.
+
+| Item | Role |
+| --- | --- |
+| `DeviceId` | Random UUID per installation. The desktop app stores it in `<config dir>/device-id`. Contains no machine or user information. |
+| `ItemId` | UUIDv7 per copy, so IDs sort by creation time. |
+| `ContentHash` | BLAKE3 over normalized content, with a per-kind prefix. Stable across OSes, versions, and restarts. Its value is pinned by a test, because changing it breaks compatibility between devices. |
+| `ClipboardItem` | `id`, `origin`, `content_hash`, `created_at`, `content`. |
+| `SyncEngine` | `on_local_change(content)` → `Copied(item)` (broadcast it) or `Echo(item)` (don't). `on_remote_item(item)` → `Write(content)` or `Ignore(reason)`. |
+
+### The rules
+
+1. **Echo suppression.** Before Cled writes a remote item, the engine remembers it. The next
+   local change with the same content hash is that write coming back, and is reported as `Echo`,
+   never broadcast. The expectation is cleared by the next local change either way (or by
+   `on_write_failed`), so it can't swallow a later genuine copy. Because content is normalized
+   before hashing, the echo is recognized even when the OS changes line endings.
+2. **Only the origin broadcasts.** Only `Copied` items are sent. Items from other devices are
+   never forwarded, so three or more devices can't form a cycle.
+3. **Deduplication.** The last 1000 item IDs are remembered. A repeated item is ignored.
+4. **Integrity.** An item whose content doesn't match its hash is ignored.
+5. **No redundant writes.** Remote content already on the clipboard isn't written again.
+6. **Newest wins.** An item older than the clipboard's current item is ignored (ties break by
+   item ID), so devices that copy at the same moment converge. This trusts the origin devices'
+   clocks. Large clock differences between devices can pick the wrong winner; the sync design
+   (M6) should revisit this.
+
+### Tests
+
+- Unit tests for each rule.
+- `tests/simulation.rs`: 2–4 in-memory devices with fake clipboards that notify only on real
+  changes. Every `Copied` item is broadcast like a real client would, so a loop shows up as
+  messages that never stop, and the test fails. Covers two and three devices, Windows line
+  endings, duplicate delivery, simultaneous copies, and 25 interleaved copies across 4 devices.
+  Disabling echo suppression makes these tests fail with "sync loop", so they do catch loops.
+- `tests/real_clipboard.rs` (opt-in, `-- --ignored`): a remote item is written through the
+  real clipboard and must come back as `Echo`.
+
 ## Desktop app (Tauri)
 
 | Interface | Direction | Shape |
@@ -166,7 +210,7 @@ next copy.
 | `write_clipboard(text)` | UI → Rust | `void` or error string |
 | `get_autostart` / `set_autostart(enabled)` | UI → Rust | `boolean` / `void` |
 | `quit` | UI → Rust | Exits (with the clipboard hand-off) |
-| `clipboard:changed` | Rust → UI | `ClipboardPayload` |
+| `clipboard:changed` | Rust → UI | `{ item: { id, origin } \| null, content: ClipboardPayload }` |
 
 `ClipboardPayload` is one of:
 
@@ -174,6 +218,10 @@ next copy.
 - `{ kind: "image", width, height, previewUrl }`: `previewUrl` is a `data:image/png` thumbnail
   (longest edge 480 px) generated in Rust. The UI never receives full-size pixels.
 - `{ kind: "skipped", reason: { type: "sensitive" } | { type: "tooLarge", width, height } }`
+
+`origin` is `{ kind: "thisDevice" }` or `{ kind: "otherDevice", deviceId }`. Every clipboard
+change goes through the `SyncEngine`, so each copy gets an item ID. Skipped content never becomes
+an item.
 
 TypeScript types for these live in `apps/desktop/src/lib/ipc.ts` and are kept in sync by hand.
 Commands run off the UI thread (`#[tauri::command(async)]`) because clipboard calls can block.

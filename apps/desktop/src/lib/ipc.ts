@@ -9,6 +9,15 @@ export type ClipboardPayload =
   | { kind: "image"; width: number; height: number; previewUrl: string | null }
   | { kind: "skipped"; reason: SkippedReason };
 
+/** Payload of the `clipboard:changed` event. */
+export type ClipboardChanged = {
+  /** The clipboard item; `null` for skipped content, which never becomes one. */
+  item: { id: string; origin: ItemOrigin } | null;
+  content: ClipboardPayload;
+};
+
+export type ItemOrigin = { kind: "thisDevice" } | { kind: "otherDevice"; deviceId: string };
+
 export type SkippedReason =
   | { type: "sensitive" }
   | { type: "tooLarge"; width: number; height: number };
@@ -38,9 +47,9 @@ export function writeClipboard(text: string): Promise<void> {
 }
 
 export function onClipboardChanged(
-  handler: (payload: ClipboardPayload) => void,
+  handler: (change: ClipboardChanged) => void,
 ): Promise<UnlistenFn> {
-  return listen<ClipboardPayload>("clipboard:changed", (event) => handler(event.payload));
+  return listen<ClipboardChanged>("clipboard:changed", (event) => handler(event.payload));
 }
 
 export function getAutostart(): Promise<boolean> {

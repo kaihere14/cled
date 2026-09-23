@@ -21,6 +21,7 @@ apps/desktop/          Tauri desktop app
   src/                 React UI
   src-tauri/           Rust entry point and Tauri glue
 crates/cled-clipboard/ Clipboard access and change detection (no Tauri dependency)
+crates/cled-sync/      Clipboard items and sync rules: loop prevention, deduplication
 docs/                  Architecture and design documents
 ```
 

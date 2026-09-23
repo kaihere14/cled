@@ -5,6 +5,7 @@ use cled_clipboard::{
     ChangeDetection, ClipboardBackend, ClipboardContent, ClipboardService, DEFAULT_POLL_INTERVAL,
     SkipReason, Snapshot,
 };
+use cled_sync::{ClipboardItem, DeviceId, LocalChange, SyncEngine};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -12,6 +13,62 @@ use crate::preview;
 
 /// Emitted to the UI whenever the system clipboard changes.
 const CHANGED_EVENT: &str = "clipboard:changed";
+
+/// Payload of the `clipboard:changed` event. Mirrors `ClipboardChanged` in `src/lib/ipc.ts`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClipboardChanged {
+    /// The clipboard item, for content (not for skipped content, which never becomes one).
+    item: Option<ItemInfo>,
+    content: ClipboardPayload,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ItemInfo {
+    id: String,
+    origin: Origin,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Origin {
+    ThisDevice,
+    #[serde(rename_all = "camelCase")]
+    OtherDevice {
+        device_id: String,
+    },
+}
+
+impl ItemInfo {
+    fn new(item: &ClipboardItem, this_device: DeviceId) -> Self {
+        Self {
+            id: item.id.to_string(),
+            origin: if item.origin == this_device {
+                Origin::ThisDevice
+            } else {
+                Origin::OtherDevice {
+                    device_id: item.origin.to_string(),
+                }
+            },
+        }
+    }
+}
+
+/// Runs a clipboard change through the sync engine. Only real local copies would be broadcast
+/// once sync exists; echoes of remote writes are reported with their original origin.
+fn process_change(engine: &mut SyncEngine, snapshot: Snapshot) -> Option<ClipboardChanged> {
+    let item = match &snapshot {
+        Snapshot::Content(content) => Some(match engine.on_local_change(content.clone()) {
+            LocalChange::Copied(item) | LocalChange::Echo(item) => {
+                ItemInfo::new(&item, engine.device())
+            }
+        }),
+        _ => None,
+    };
+    Some(ClipboardChanged {
+        item,
+        content: ClipboardPayload::from_snapshot(snapshot)?,
+    })
+}
 
 /// What the UI is told about the clipboard. Mirrors `ClipboardPayload` in `src/lib/ipc.ts`.
 #[derive(Debug, Clone, Serialize)]
@@ -65,9 +122,10 @@ impl ClipboardPayload {
 pub struct ClipboardState(Result<ClipboardService, String>);
 
 impl ClipboardState {
-    pub fn start(app: AppHandle) -> Self {
+    pub fn start(app: AppHandle, device: DeviceId) -> Self {
+        let mut engine = SyncEngine::new(device);
         let service = ClipboardService::spawn(DEFAULT_POLL_INTERVAL, move |snapshot| {
-            if let Some(payload) = ClipboardPayload::from_snapshot(snapshot)
+            if let Some(payload) = process_change(&mut engine, snapshot)
                 && let Err(err) = app.emit(CHANGED_EVENT, payload)
             {
                 eprintln!("failed to emit {CHANGED_EVENT}: {err}");

@@ -1,5 +1,6 @@
 mod background;
 mod clipboard;
+mod device;
 mod preview;
 
 use tauri::{Manager, RunEvent};
@@ -10,7 +11,8 @@ pub fn run() {
         .plugin(background::single_instance_plugin())
         .plugin(background::autostart_plugin())
         .setup(|app| {
-            let state = clipboard::ClipboardState::start(app.handle().clone());
+            let device = device::load_or_create(app.handle());
+            let state = clipboard::ClipboardState::start(app.handle().clone(), device);
             app.manage(state);
             background::setup(app)?;
             Ok(())
