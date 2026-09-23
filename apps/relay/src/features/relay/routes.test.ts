@@ -528,3 +528,28 @@ test("malformed tunnel frames are rejected without closing the connection", asyn
   mac.socket.terminate();
   fedora.socket.terminate();
 });
+
+test("a device can list its user's other connected devices, and only those", async (t) => {
+  const { app } = await setup(t);
+  const unregistered = await connect(app);
+  unregistered.send({ type: "devices" });
+  const refused = await unregistered.next();
+  assert.equal(refused.type === "error" && refused.code, "not_registered");
+
+  const mac = await register(app, "user_A", "mac");
+  mac.send({ type: "devices" });
+  assert.deepEqual(await mac.next(), { type: "devices", deviceIds: [] });
+
+  const fedora = await register(app, "user_A", "fedora");
+  const windows = await register(app, "user_A", "windows");
+  const otherUser = await register(app, "user_B", "linux");
+  mac.send({ type: "devices" });
+  const listed = await mac.next();
+  assert.equal(listed.type, "devices");
+  assert.deepEqual(listed.type === "devices" && [...listed.deviceIds].sort(), [
+    "fedora",
+    "windows",
+  ]);
+
+  for (const client of [unregistered, mac, fedora, windows, otherUser]) client.socket.terminate();
+});

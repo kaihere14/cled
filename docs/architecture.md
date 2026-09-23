@@ -257,7 +257,9 @@ and `LanNode::accept_over` start a session over a stream someone else opened, an
 `LanNode::should_connect` applies the same "lower ID dials" rule as direct connections. Both
 transports register the same kind of connection, so broadcasting, receiving, and the `SyncEngine`
 path don't know which one an item used. If both are available, the first session to a device
-wins, as with duplicate TCP connections. Pairing is only possible over direct TCP.
+wins, as with duplicate TCP connections. Pairing works over both: `LanNode::pair_over` runs the
+same SPAKE2 + Noise `XXpsk3` exchange through a tunnel, so devices on different networks can
+pair.
 
 ## Desktop app (Tauri)
 
@@ -344,6 +346,18 @@ The relay connection task (`src-tauri/src/relay.rs`) opens a tunnel every 5 s to
 device it should dial and isn't connected to, and hands tunnels other devices open to the node.
 Dropping the relay connection closes every tunnel.
 
+**Joining through the relay.** Signing in doesn't make a device trusted: the relay (or anyone
+who takes over the account) could otherwise insert its own key and read everything. Every 5 s the
+task asks the relay which of the account's devices are connected (`devices`). For each one that
+isn't paired with this device, the device with the lower ID shows a one-time pairing code and the
+other asks for it (`JoinStatus`, `relay:join`, with a system notification since Cled usually
+runs in the tray). Entering the code runs the regular pairing exchange through a tunnel to each
+unpaired device of the account (`pair_through_relay`); only the one showing that code can
+complete it. The code never crosses the relay, and SPAKE2 gives a relay that intercepts the
+exchange one guess per attempt, three attempts per code. Comparing a code shown on both devices
+instead of typing it would be one click less, but a relay in the middle could search for keys
+that make both codes match; typing avoids that without any new cryptography.
+
 `scripts/relay-e2e.sh` runs a real relay with a stand-in Clerk instance and sends text and images
 between four nodes that can only reach each other through it, checking that nothing the relay
 received or logged contains clipboard content. See [apps/relay/README.md](../apps/relay/README.md).
@@ -356,4 +370,5 @@ received or logged contains clipboard content. See [apps/relay/README.md](../app
 - Images in history can't be copied again from the UI. Only thumbnails are kept, and full-size
   history storage comes later.
 - History is not persisted.
-- Devices must be paired on the same network once before they can sync through the relay.
+- A new device joins by typing a one-time code shown on another device (on the same network, or
+  through the relay when both are signed in to the same account).

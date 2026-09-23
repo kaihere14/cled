@@ -16,6 +16,15 @@ type Mode = "show" | "enter";
 
 const CODE_LIFETIME_S = 120;
 
+/** Text field for an 8-character pairing code. */
+export const CODE_INPUT_CLASS =
+  "min-w-0 rounded-md border border-neutral-200 bg-white px-3 py-1.5 text-sm font-mono tracking-widest outline-none placeholder:text-neutral-400 focus-visible:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:focus-visible:border-neutral-500";
+
+/** Whether `code` has all 8 characters, with or without the dash. */
+export function isCompleteCode(code: string): boolean {
+  return code.replace("-", "").length >= 8;
+}
+
 /**
  * Pairing, inline in the Devices list. Opened occasionally, so it gets a short enter transition;
  * reduced motion keeps only the fade.
@@ -41,8 +50,9 @@ export function PairingPanel({ address, onDone }: { address: string | null; onDo
           <ModeSwitch mode={mode} onChange={setMode} />
           {mode === "show" ? <ShowCode onPaired={setPaired} /> : <EnterCode onPaired={setPaired} />}
           <p className="text-xs text-neutral-500">
-            Both devices must be on the same network. If your system asks whether Cled may use the
-            network, allow it.
+            Both devices must be on the same network. For devices elsewhere, sign in to the same
+            account in relay mode on both, and Cled asks for a code by itself. If your system asks
+            whether Cled may use the network, allow it.
             {address && (
               <>
                 {" "}
@@ -79,7 +89,7 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
   );
 }
 
-function ShowCode({ onPaired }: { onPaired: (name: string) => void }) {
+export function ShowCode({ onPaired }: { onPaired: (name: string) => void }) {
   const [code, setCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState(0);
   const [now, setNow] = useState(Date.now());
@@ -222,12 +232,9 @@ function EnterCode({ onPaired }: { onPaired: (name: string) => void }) {
           maxLength={9}
           autoCapitalize="characters"
           spellCheck={false}
-          className={`${inputClass} flex-1 font-mono tracking-widest`}
+          className={`${CODE_INPUT_CLASS} flex-1`}
         />
-        <Button
-          type="submit"
-          disabled={busy || !address.trim() || code.replace("-", "").length < 8}
-        >
+        <Button type="submit" disabled={busy || !address.trim() || !isCompleteCode(code)}>
           {busy ? "Pairing…" : "Pair"}
         </Button>
       </div>

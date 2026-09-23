@@ -19,7 +19,7 @@ const MODES: { value: ConnectionMode; label: string }[] = [
 /**
  * Connection mode, relay connection status, account, and relay URL, as rows of the Settings card.
  * In relay mode, clipboard items also reach paired devices through the relay, end-to-end
- * encrypted; pairing itself still happens on the local network, and the UI says so.
+ * encrypted, and new devices of the account pair through it (see `RelayJoin`).
  */
 export function ConnectionSettings({ onError }: { onError: (error: string | null) => void }) {
   const [mode, setMode] = useState<ConnectionMode | null>(null);
@@ -83,8 +83,8 @@ export function ConnectionSettings({ onError }: { onError: (error: string | null
               inputProps={{ type: "url", inputMode: "url" }}
             />
             <p className="text-xs text-neutral-500">
-              Paired devices signed in to this account sync through the relay, end-to-end encrypted.
-              Pair new devices on the same network first.
+              Your devices signed in to this account sync through the relay, end-to-end encrypted. A
+              new device joins with a one-time code, asked for under Devices.
             </p>
           </div>
         </div>

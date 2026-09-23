@@ -96,8 +96,16 @@ Each message is one JSON object in a text frame.
    and the sender gets `{ "type": "sent", "recipients": 2 }`. There's no target: a device can only
    reach its own user's devices. Test messages are at most 4096 characters. They are temporary,
    for checking a connection, and never carry clipboard content.
-4. Clipboard items go through [tunnels](#tunnels), in binary frames.
-5. Closing the connection, cleanly or not, removes only that device. The user's other devices
+4. List your other connected devices, so a new device can find the ones to pair with:
+
+   ```json
+   { "type": "devices" }
+   ```
+
+   Answered with `{ "type": "devices", "deviceIds": ["fedora", "windows"] }`: only the sender's
+   own user's devices, never the sender itself.
+5. Clipboard items, and pairing between devices, go through [tunnels](#tunnels), in binary frames.
+6. Closing the connection, cleanly or not, removes only that device. The user's other devices
    stay connected.
 
 Anything else invalid gets `{ "type": "error", "code": "...", "message": "..." }`:
@@ -108,14 +116,16 @@ Anything else invalid gets `{ "type": "error", "code": "...", "message": "..." }
 | `invalid_frame` | A binary frame that isn't a valid tunnel frame, or is addressed to the sender. |
 | `invalid_message` | Valid JSON, but not a message described above (including a missing token). |
 | `unauthorized` | The access token was rejected. The connection is closed. |
-| `not_registered` | Sent `message` or a tunnel frame before registering. |
+| `not_registered` | Sent `message`, `devices`, or a tunnel frame before registering. |
 | `already_registered` | Sent `register` twice on one connection. |
 | `no_other_devices` | The sender's user has no other devices connected. |
 | `internal_error` | Something failed in the relay. Details are logged, not sent. |
 
 ### Tunnels
 
-Two paired devices sync by running their end-to-end encrypted session (the same Noise `KK`
+Two devices of the same user pair by running Cled's pairing exchange (a one-time code shown on
+one and typed on the other, SPAKE2, then Noise `XXpsk3`) through a tunnel; the code never crosses
+the relay. Paired devices sync by running their end-to-end encrypted session (the same Noise `KK`
 session they use on a local network, see `crates/cled-lan` and
 [RFC 0001](../../docs/rfcs/0001-lan-sync.md)) over a tunnel: an ordered byte stream between them,
 carried in binary WebSocket frames. Every byte in a tunnel is ciphertext and authenticated end to

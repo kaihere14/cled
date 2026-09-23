@@ -72,6 +72,8 @@ pub fn run() {
             auth::sign_out,
             relay::relay_status,
             relay::send_relay_test,
+            relay::pair_through_relay,
+            relay::relay_join_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

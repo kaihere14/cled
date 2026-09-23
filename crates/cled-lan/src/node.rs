@@ -323,8 +323,37 @@ impl LanNode {
         });
     }
 
-    /// Accepts a session over `transport` that the transport says `from` opened. Like a direct
-    /// connection, it's refused unless `from` completes the handshake with its paired key.
+    /// Pairs with `device`, which is showing `code`, over `transport` (a relay tunnel to it). The
+    /// same exchange as on the local network: the code never crosses the transport, and without
+    /// it nobody in between can complete the pairing. Returns the paired device.
+    pub fn pair_over(
+        &self,
+        device: DeviceId,
+        transport: impl Transport,
+        code: &str,
+    ) -> impl Future<Output = Result<PeerStatus>> + Send + 'static {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        match PairingCode::parse(code) {
+            Ok(code) => {
+                let inner = Arc::clone(&self.inner);
+                self.runtime().spawn(async move {
+                    let (reader, writer) = split(transport);
+                    let result = inner
+                        .join_pairing_over(reader, writer, None, Some(device), code)
+                        .await;
+                    let _ = tx.send(result);
+                });
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err));
+            }
+        }
+        async move { rx.await.map_err(|_| LanError::Stopped)? }
+    }
+
+    /// Accepts a connection over `transport` that the transport says `from` opened: a session,
+    /// refused unless `from` completes the handshake with its paired key, or a pairing attempt,
+    /// refused unless this device is showing a code and `from` knows it.
     pub fn accept_over(&self, from: DeviceId, transport: impl Transport) {
         let inner = Arc::clone(&self.inner);
         self.runtime().spawn(async move {
@@ -538,7 +567,7 @@ impl Inner {
         self: &Arc<Self>,
         mut reader: Reader,
         mut writer: Writer,
-        peer_addr: SocketAddr,
+        peer_addr: Option<SocketAddr>,
         joiner: DeviceId,
     ) -> Result<()> {
         let mut session = self.pairing.lock().await;
@@ -600,7 +629,21 @@ impl Inner {
         code: PairingCode,
     ) -> Result<PeerStatus> {
         let (stream, address) = connect_any(&addresses).await?;
-        let (mut reader, mut writer) = split_tcp(stream);
+        let (reader, writer) = split_tcp(stream);
+        self.join_pairing_over(reader, writer, Some(address), None, code)
+            .await
+    }
+
+    /// Pairs over an open connection with the device showing `code`. Through a tunnel,
+    /// `expected` is the device the tunnel leads to; the listener must be that device.
+    async fn join_pairing_over(
+        self: &Arc<Self>,
+        mut reader: Reader,
+        mut writer: Writer,
+        address: Option<SocketAddr>,
+        expected: Option<DeviceId>,
+        code: PairingCode,
+    ) -> Result<PeerStatus> {
         writer
             .write_all(&preamble(KIND_PAIRING, self.config.device_id))
             .await?;
@@ -611,6 +654,9 @@ impl Inner {
             return Err(LanError::NotPairing);
         }
         let listener = DeviceId::from_bytes(listener_id);
+        if expected.is_some_and(|expected| expected != listener) {
+            return Err(LanError::UnknownPeer);
+        }
 
         let (hello, public_key) = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
@@ -690,15 +736,16 @@ impl Inner {
     }
 
     /// Saves a newly paired device. Its address is the one it connected from (or was reached
-    /// at) with the port it listens on, as announced in its `Hello`.
+    /// at) with the port it listens on, as announced in its `Hello`; none when paired through a
+    /// tunnel.
     fn store_peer(
         &self,
         id: DeviceId,
         hello: Hello,
         public_key: [u8; 32],
-        address: SocketAddr,
+        address: Option<SocketAddr>,
     ) -> Result<()> {
-        let last_address = Some(with_port(address, hello.listen_port));
+        let last_address = address.map(|address| with_port(address, hello.listen_port));
         lock(&self.peers).upsert(Peer {
             device_id: id,
             name: hello.name,
@@ -1065,12 +1112,13 @@ async fn handle_incoming(inner: Arc<Inner>, stream: impl Transport, origin: Orig
             inner.accept_session(reader, writer, None, sender).await
         }
         (KIND_PAIRING, Origin::Tcp(address)) => {
-            inner.accept_pairing(reader, writer, address, sender).await
+            inner
+                .accept_pairing(reader, writer, Some(address), sender)
+                .await
         }
-        // Pairing needs both devices on the same network; tunnels only carry sessions.
-        (KIND_PAIRING, Origin::Tunnel(_)) => Err(LanError::Malformed(
-            "pairing isn't possible through a tunnel".into(),
-        )),
+        (KIND_PAIRING, Origin::Tunnel(_)) => {
+            inner.accept_pairing(reader, writer, None, sender).await
+        }
         (other, _) => Err(LanError::Malformed(format!(
             "unknown connection kind {other}"
         ))),

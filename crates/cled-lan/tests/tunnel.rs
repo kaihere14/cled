@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cled_clipboard::{ClipboardContent, Image};
-use cled_lan::{Config, Event, Keys, LanNode};
+use cled_lan::{Config, Event, Keys, LanError, LanNode, PeerStatus};
 use cled_sync::{ClipboardItem, DeviceId, LocalChange, RemoteItem, SyncEngine};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
@@ -355,4 +355,96 @@ fn keeps_the_last_direct_address_when_connected_through_a_tunnel() {
     relay.connect(&a, &b);
     let after = std::fs::read_to_string(&a.config.peers_path).unwrap();
     assert_eq!(before, after);
+}
+
+impl Relay {
+    /// `joiner` types `code`, shown on `listener`, and pairs through a tunnel.
+    fn pair(
+        &self,
+        joiner: &TestNode,
+        listener: &TestNode,
+        code: &str,
+    ) -> cled_lan::Result<PeerStatus> {
+        let (joiner_end, listener_end) = self.tunnel();
+        let pairing = joiner.node.pair_over(listener.id(), joiner_end, code);
+        listener.node.accept_over(joiner.id(), listener_end);
+        self.runtime.block_on(pairing)
+    }
+}
+
+#[test]
+fn devices_on_different_networks_pair_through_a_tunnel_then_sync() {
+    // Never on the same network: no direct connection is ever possible.
+    let mac = TestNode::new("mac");
+    let fedora = TestNode::new("fedora");
+    let relay = Relay::new();
+
+    let code = mac.node.start_pairing().unwrap().to_string();
+    let paired = relay
+        .pair(&fedora, &mac, &code)
+        .expect("paired through the relay");
+    assert_eq!((paired.device_id, paired.name.as_str()), (mac.id(), "mac"));
+    let paired_on_mac = mac
+        .events
+        .recv_timeout(TIMEOUT)
+        .into_iter()
+        .chain(mac.events.try_iter())
+        .any(|event| matches!(event, Event::Paired { device_id, .. } if device_id == fedora.id()));
+    assert!(paired_on_mac);
+    // The code never crossed the relay.
+    assert!(!relay.saw(code.as_bytes()) && !relay.saw(code.replace('-', "").as_bytes()));
+
+    let (low, high) = if mac.id() < fedora.id() {
+        (&mac, &fedora)
+    } else {
+        (&fedora, &mac)
+    };
+    relay.connect(low, high);
+    let mut engine = SyncEngine::new(fedora.id());
+    fedora.node.broadcast(copied(
+        &mut engine,
+        ClipboardContent::text("paired over the relay"),
+    ));
+    let (got, _) = received(&mac, TIMEOUT).expect("synced");
+    assert_eq!(got.content, ClipboardContent::text("paired over the relay"));
+    assert!(!relay.saw(b"paired over the relay"));
+}
+
+#[test]
+fn pairing_through_a_tunnel_needs_the_right_code_and_the_right_device() {
+    let mac = TestNode::new("mac");
+    let fedora = TestNode::new("fedora");
+    let relay = Relay::new();
+
+    // Not showing a code.
+    assert!(matches!(
+        relay.pair(&fedora, &mac, "ABCD-EFGH"),
+        Err(LanError::NotPairing)
+    ));
+
+    let code = mac.node.start_pairing().unwrap().to_string();
+    let wrong = if code.starts_with('A') {
+        "BBBB-BBBB"
+    } else {
+        "AAAA-AAAA"
+    };
+    assert!(matches!(
+        relay.pair(&fedora, &mac, wrong),
+        Err(LanError::WrongCode)
+    ));
+    assert!(fedora.node.peers().is_empty() && mac.node.peers().is_empty());
+
+    // A tunnel that leads somewhere other than the device the joiner meant is refused.
+    let (joiner_end, listener_end) = relay.tunnel();
+    let pairing = fedora
+        .node
+        .pair_over(DeviceId::new_random(), joiner_end, &code);
+    mac.node.accept_over(fedora.id(), listener_end);
+    assert!(matches!(
+        relay.runtime.block_on(pairing),
+        Err(LanError::UnknownPeer)
+    ));
+
+    // The right code still works (two failures so far, under the limit of three).
+    relay.pair(&fedora, &mac, &code).expect("paired");
 }

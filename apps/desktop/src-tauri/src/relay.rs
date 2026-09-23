@@ -21,6 +21,7 @@ use cled_sync::DeviceId;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use tokio_tungstenite::tungstenite::{self, Message, protocol::frame::coding::CloseCode};
@@ -31,6 +32,8 @@ use crate::settings::{ConnectionMode, Settings};
 const CHANGED_EVENT: &str = "relay:changed";
 /// Emitted with a `ReceivedMessage` when another device's test message arrives.
 const MESSAGE_EVENT: &str = "relay:message";
+/// Emitted with the new `JoinStatus` whenever it changes.
+const JOIN_EVENT: &str = "relay:join";
 
 /// Limit for connecting and for the relay to answer registration.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,6 +46,8 @@ const MAX_RETRY: Duration = Duration::from_secs(30);
 /// How often to open tunnels to paired devices that aren't connected. Devices that aren't on the
 /// relay cost one small frame each, which the relay answers with a close.
 const TUNNEL_INTERVAL: Duration = Duration::from_secs(5);
+/// How long pairing through the relay may take.
+const PAIR_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a test message waits for the relay to confirm it.
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// The relay closes a connection with this code when the same device connects again
@@ -69,6 +74,36 @@ pub enum RelayStatus {
         error: String,
         retry_in_secs: Option<u64>,
     },
+}
+
+/// Devices of this account on the relay that aren't paired with this one yet, and what this
+/// device's part is in pairing them. Of two such devices, the one with the lower ID shows a code
+/// and the other asks for it, so both screens say what to do. Mirrors `JoinStatus` in
+/// `src/lib/ipc.ts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinStatus {
+    /// Show a pairing code, to be entered on another device.
+    show_code: bool,
+    /// Ask for the code another device shows.
+    enter_code: bool,
+}
+
+impl JoinStatus {
+    fn new(me: DeviceId, online: &[DeviceId], paired: &[DeviceId]) -> Self {
+        let unpaired = online
+            .iter()
+            .filter(|id| **id != me && !paired.contains(id));
+        let mut status = Self::default();
+        for &id in unpaired {
+            if me < id {
+                status.show_code = true;
+            } else {
+                status.enter_code = true;
+            }
+        }
+        status
+    }
 }
 
 /// Payload of `relay:message`.
@@ -131,16 +166,34 @@ impl Control {
     }
 }
 
-/// A test message waiting to be sent, and where to report how many devices received it.
-struct Outgoing {
-    message: String,
-    reply: oneshot::Sender<Result<u32, String>>,
+/// A request for the connection task.
+enum Outgoing {
+    /// A test message, and where to report how many devices received it.
+    Test {
+        message: String,
+        reply: oneshot::Sender<Result<u32, String>>,
+    },
+    /// Pair with the device of this account that shows `code`; reports its name.
+    Pair {
+        code: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+}
+
+impl Outgoing {
+    fn refuse(self, error: &str) {
+        match self {
+            Self::Test { reply, .. } => drop(reply.send(Err(error.to_owned()))),
+            Self::Pair { reply, .. } => drop(reply.send(Err(error.to_owned()))),
+        }
+    }
 }
 
 pub struct RelayState {
     control: Control,
     outgoing: mpsc::UnboundedSender<Outgoing>,
     status: Arc<Mutex<RelayStatus>>,
+    join: Arc<Mutex<JoinStatus>>,
     device_name: String,
 }
 
@@ -167,15 +220,17 @@ impl RelayState {
         };
         let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
         let status = Arc::new(Mutex::new(RelayStatus::Off));
+        let join = Arc::new(Mutex::new(JoinStatus::default()));
         let reporter = Reporter {
             app: app.clone(),
             status: Arc::clone(&status),
+            join: Arc::clone(&join),
         };
         let task = Task {
             reporter,
             auth,
             control: control.clone(),
-            device_id: device.to_string(),
+            device,
             node,
         };
         tauri::async_runtime::spawn(task.run(desired_rx, outgoing_rx));
@@ -183,6 +238,7 @@ impl RelayState {
             control,
             outgoing,
             status,
+            join,
             device_name,
         }
     }
@@ -219,14 +275,45 @@ fn socket_url(relay_url: &str) -> Option<String> {
     Some(url.into())
 }
 
-/// Stores the status for `relay_status` and tells the UI about changes.
+/// Stores the status for `relay_status` and `relay_join_status`, and tells the UI about changes.
 struct Reporter<R: Runtime> {
     app: AppHandle<R>,
     status: Arc<Mutex<RelayStatus>>,
+    join: Arc<Mutex<JoinStatus>>,
 }
 
 impl<R: Runtime> Reporter<R> {
+    fn set_join(&self, join: JoinStatus) {
+        let previous = std::mem::replace(&mut *lock(&self.join), join);
+        if previous == join {
+            return;
+        }
+        if let Err(err) = self.app.emit(JOIN_EVENT, join) {
+            eprintln!("failed to emit {JOIN_EVENT}: {err}");
+        }
+        // Cled usually runs in the tray, so say so outside the window too.
+        let body = if join.enter_code && !previous.enter_code {
+            "A new device signed in to your account. Open Cled and enter the code it shows to \
+             start syncing."
+        } else if join.show_code && !previous.show_code {
+            "Another device on your account wants to sync. Open Cled to see the code to enter \
+             there."
+        } else {
+            return;
+        };
+        let _ = self
+            .app
+            .notification()
+            .builder()
+            .title("Cled")
+            .body(body)
+            .show();
+    }
+
     fn set(&self, status: RelayStatus) {
+        if status != RelayStatus::Connected {
+            self.set_join(JoinStatus::default());
+        }
         let mut current = lock(&self.status);
         if *current == status {
             return;
@@ -245,8 +332,8 @@ impl<R: Runtime> Reporter<R> {
     }
 }
 
-fn lock(status: &Mutex<RelayStatus>) -> MutexGuard<'_, RelayStatus> {
-    status
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -276,7 +363,7 @@ struct Task<R: Runtime> {
     reporter: Reporter<R>,
     auth: Arc<AuthState>,
     control: Control,
-    device_id: String,
+    device: DeviceId,
     /// Runs sessions over tunnels. `None` if sync couldn't start; the connection still works.
     node: Option<Arc<LanNode>>,
 }
@@ -361,7 +448,7 @@ impl<R: Runtime> Task<R> {
     }
 }
 
-/// Waits until the desired state changes or `delay` passes, turning away test messages meanwhile.
+/// Waits until the desired state changes or `delay` passes, turning away requests meanwhile.
 async fn idle(
     desired: &mut watch::Receiver<Desired>,
     outgoing: &mut mpsc::UnboundedReceiver<Outgoing>,
@@ -377,9 +464,7 @@ async fn idle(
                     None => std::future::pending().await,
                 }
             } => return,
-            Some(out) = outgoing.recv() => {
-                let _ = out.reply.send(Err("Not connected to the relay.".into()));
-            }
+            Some(out) = outgoing.recv() => out.refuse("Not connected to the relay."),
         }
     }
 }
@@ -389,9 +474,21 @@ async fn idle(
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ServerMessage {
     Registered {},
-    Message { from: Sender, message: String },
-    Sent { recipients: u32 },
-    Error { code: String, message: String },
+    Message {
+        from: Sender,
+        message: String,
+    },
+    Sent {
+        recipients: u32,
+    },
+    #[serde(rename_all = "camelCase")]
+    Devices {
+        device_ids: Vec<String>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,7 +529,7 @@ impl<R: Runtime> Task<R> {
         let register = serde_json::json!({
             "type": "register",
             "accessToken": access_token,
-            "deviceId": self.device_id,
+            "deviceId": self.device.to_string(),
         });
         if let Err(err) = sink.send(Message::text(register.to_string())).await {
             return failed(format!("Lost the connection while registering: {err}"));
@@ -467,6 +564,10 @@ impl<R: Runtime> Task<R> {
         let mut last_seen = Instant::now();
         // Dropped with this connection, which ends every session running through it.
         let (mut tunnels, mut pumped) = Tunnels::new();
+        // A pairing request waiting for the relay's list of devices.
+        let mut pairing: Option<(String, oneshot::Sender<Result<String, String>>)> = None;
+        // This account's other devices on the relay, as of the last `devices` answer.
+        let mut online: Vec<DeviceId> = Vec::new();
         let mut dial = interval(TUNNEL_INTERVAL);
         dial.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -524,18 +625,51 @@ impl<R: Runtime> Task<R> {
                             }
                             None => eprintln!("relay error {code}: {message}"),
                         },
+                        Ok(ServerMessage::Devices { device_ids }) => {
+                            online = device_ids.iter().filter_map(|id| id.parse().ok()).collect();
+                            self.update_join(&online);
+                            let Some((code, reply)) = pairing.take() else { continue };
+                            let Some(node) = &self.node else {
+                                let _ = reply.send(Err("Sync isn't available on this device.".into()));
+                                continue;
+                            };
+                            let (frames, outcome) = tunnels.pair(&device_ids, node, &code);
+                            for open in frames {
+                                if let Err(err) = sink.send(Message::binary(open)).await {
+                                    return dropped(format!("Lost the connection: {err}"));
+                                }
+                            }
+                            tokio::spawn(async move {
+                                let _ = reply.send(outcome.await);
+                            });
+                        }
                         Ok(ServerMessage::Registered {}) => {}
                         Err(err) => eprintln!("unexpected message from the relay: {err}"),
                     }
                 }
                 Some(out) = outgoing.recv() => {
-                    // No target: the relay only ever routes to this account's other devices.
-                    let json = serde_json::json!({ "type": "message", "message": out.message });
+                    let (json, out) = match out {
+                        // No target: the relay only ever routes to this account's other devices.
+                        Outgoing::Test { message, reply } => {
+                            (serde_json::json!({ "type": "message", "message": message }), Ok(reply))
+                        }
+                        Outgoing::Pair { .. } if pairing.is_some() => {
+                            out.refuse("Already pairing.");
+                            continue;
+                        }
+                        // First find this account's devices on the relay; pairing continues when
+                        // the relay answers.
+                        Outgoing::Pair { code, reply } => {
+                            (serde_json::json!({ "type": "devices" }), Err((code, reply)))
+                        }
+                    };
                     if let Err(err) = sink.send(Message::text(json.to_string())).await {
-                        let _ = out.reply.send(Err("Not connected to the relay.".into()));
                         return dropped(format!("Lost the connection: {err}"));
                     }
-                    pending.push_back(out.reply);
+                    match out {
+                        Ok(reply) => pending.push_back(reply),
+                        Err(pair) => pairing = Some(pair),
+                    }
                 }
                 Some(pumped) = pumped.recv() => {
                     // Ciphertext from a session, or the end of one.
@@ -552,6 +686,12 @@ impl<R: Runtime> Task<R> {
                             return dropped(format!("Lost the connection: {err}"));
                         }
                     }
+                    // Pairing may have finished since the last answer, and devices come and go.
+                    self.update_join(&online);
+                    let json = serde_json::json!({ "type": "devices" });
+                    if let Err(err) = sink.send(Message::text(json.to_string())).await {
+                        return dropped(format!("Lost the connection: {err}"));
+                    }
                 }
                 _ = ping.tick() => {
                     if last_seen.elapsed() > IDLE_TIMEOUT {
@@ -563,6 +703,15 @@ impl<R: Runtime> Task<R> {
                 }
             }
         }
+    }
+}
+
+impl<R: Runtime> Task<R> {
+    fn update_join(&self, online: &[DeviceId]) {
+        let Some(node) = &self.node else { return };
+        let paired: Vec<DeviceId> = node.peers().iter().map(|p| p.device_id).collect();
+        self.reporter
+            .set_join(JoinStatus::new(self.device, online, &paired));
     }
 }
 
@@ -612,12 +761,36 @@ pub async fn send_relay_test(state: State<'_, RelayState>) -> Result<u32, String
     let message = format!("Hello from {}", state.device_name);
     state
         .outgoing
-        .send(Outgoing { message, reply })
+        .send(Outgoing::Test { message, reply })
         .map_err(|_| "Not connected to the relay.".to_owned())?;
     match timeout(TEST_TIMEOUT, result).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("Not connected to the relay.".into()),
         Err(_) => Err("The relay didn't confirm the message.".into()),
+    }
+}
+
+#[tauri::command(async)]
+pub fn relay_join_status(state: State<'_, RelayState>) -> JoinStatus {
+    *lock(&state.join)
+}
+
+/// Pairs with the device of this account that is showing `code`, through the relay, so devices
+/// on different networks can pair. Returns the paired device's name.
+#[tauri::command]
+pub async fn pair_through_relay(
+    state: State<'_, RelayState>,
+    code: String,
+) -> Result<String, String> {
+    let (reply, result) = oneshot::channel();
+    state
+        .outgoing
+        .send(Outgoing::Pair { code, reply })
+        .map_err(|_| "Not connected to the relay.".to_owned())?;
+    match timeout(PAIR_TIMEOUT, result).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("Not connected to the relay.".into()),
+        Err(_) => Err("Pairing took too long. Try again.".into()),
     }
 }
 
@@ -672,6 +845,30 @@ mod tests {
 
         inputs.signed_in = false;
         assert_eq!(Desired::from_inputs(&inputs), Desired::NeedsSignIn);
+    }
+
+    #[test]
+    fn of_two_unpaired_devices_the_lower_id_shows_the_code() {
+        let mut ids: Vec<DeviceId> = (0..3).map(|_| DeviceId::new_random()).collect();
+        ids.sort();
+        let [low, middle, high] = ids[..] else {
+            unreachable!()
+        };
+        let status = |show_code, enter_code| JoinStatus {
+            show_code,
+            enter_code,
+        };
+
+        assert_eq!(JoinStatus::new(low, &[high], &[]), status(true, false));
+        assert_eq!(JoinStatus::new(high, &[low], &[]), status(false, true));
+        // In the middle of three new devices: show a code to one, enter the other's.
+        assert_eq!(
+            JoinStatus::new(middle, &[low, high], &[]),
+            status(true, true)
+        );
+        // Paired devices, and no other devices, need nothing.
+        assert_eq!(JoinStatus::new(low, &[high], &[high]), status(false, false));
+        assert_eq!(JoinStatus::new(low, &[], &[]), status(false, false));
     }
 
     #[test]

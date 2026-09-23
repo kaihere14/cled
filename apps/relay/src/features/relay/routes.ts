@@ -144,6 +144,18 @@ async function handleFrame(context: FrameContext, data: Buffer, isBinary: boolea
       await register(context, message);
       return;
     }
+    case "devices": {
+      if (!sender) {
+        send(socket, errorMessage("not_registered", "register before listing devices"));
+        return;
+      }
+      const deviceIds = connections
+        .getUserConnections(sender.userId)
+        .filter((connection) => connection !== sender)
+        .map((connection) => connection.deviceId);
+      send(socket, { type: "devices", deviceIds });
+      return;
+    }
     case "message": {
       if (!sender) {
         send(socket, errorMessage("not_registered", "register before sending messages"));

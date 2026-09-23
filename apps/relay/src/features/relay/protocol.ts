@@ -38,10 +38,17 @@ const testMessageSchema = z.strictObject({
   message: z.string().max(MAX_TEST_MESSAGE_LENGTH),
 });
 
+/**
+ * Asks which other devices of the sender's user are connected, so a device can find the one
+ * showing a pairing code. Answered with `devices`.
+ */
+const devicesRequestSchema = z.strictObject({ type: z.literal("devices") });
+
 /** Anything a client may send. */
 export const clientMessageSchema = z.discriminatedUnion("type", [
   registerMessageSchema,
   testMessageSchema,
+  devicesRequestSchema,
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 
@@ -85,6 +92,8 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     from: z.object({ userId: userIdSchema, deviceId: deviceIdSchema }),
     message: z.string(),
   }),
+  /** The other connected devices of the sender's user, answering `devices`. */
+  z.object({ type: z.literal("devices"), deviceIds: z.array(deviceIdSchema) }),
   /** The sender's test message was forwarded to `recipients` connections. */
   z.object({ type: z.literal("sent"), recipients: z.number().int().positive() }),
   errorMessageSchema,

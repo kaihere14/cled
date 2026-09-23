@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use cled_lan::LanNode;
+use cled_lan::{LanError, LanNode};
 use cled_sync::DeviceId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
@@ -126,6 +126,64 @@ impl Tunnels {
             frames.push(open);
         }
         frames
+    }
+
+    /// Pairs with whichever of `devices` (this account's other devices on the relay) is showing
+    /// `code`, trying the ones not yet paired at once, each through a new tunnel. The pairing
+    /// exchange is the same as on the local network, so the relay never learns the code or can
+    /// pair in anyone's place. Returns the `open` frames to send first, and the outcome: the
+    /// paired device's name.
+    pub fn pair(
+        &mut self,
+        devices: &[String],
+        node: &LanNode,
+        code: &str,
+    ) -> (
+        Vec<Vec<u8>>,
+        impl Future<Output = Result<String, String>> + Send + 'static,
+    ) {
+        let paired: Vec<DeviceId> = node.peers().iter().map(|p| p.device_id).collect();
+        let mut frames = Vec::new();
+        let mut attempts = Vec::new();
+        for device in devices {
+            let Ok(device) = device.parse::<DeviceId>() else {
+                continue;
+            };
+            if paired.contains(&device) {
+                continue;
+            }
+            let (stream, open) = self.open(device);
+            frames.push(open);
+            attempts.push(node.pair_over(device, stream, code));
+        }
+        let outcome = async move {
+            if attempts.is_empty() {
+                return Err(
+                    "No other device signed in to this account is connected to the relay. \
+                    Open Cled there, choose Relay, and sign in."
+                        .to_owned(),
+                );
+            }
+            let mut set = tokio::task::JoinSet::new();
+            for attempt in attempts {
+                set.spawn(attempt);
+            }
+            // Devices not showing a code refuse at once; report the most useful failure.
+            let mut failure = None;
+            while let Some(result) = set.join_next().await {
+                match result {
+                    Ok(Ok(peer)) => return Ok(peer.name),
+                    Ok(Err(LanError::NotPairing)) | Err(_) => {}
+                    Ok(Err(err)) => failure = Some(err.to_string()),
+                }
+            }
+            Err(failure.unwrap_or_else(|| {
+                "No device on this account is showing a pairing code. On the other device, \
+                    choose \"Show my code\"."
+                    .to_owned()
+            }))
+        };
+        (frames, outcome)
     }
 
     /// Whether a tunnel to or from `peer` is open.

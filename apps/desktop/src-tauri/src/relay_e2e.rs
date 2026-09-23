@@ -19,6 +19,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::tunnel::Tunnels;
 
+/// A code to pair with, and where to report the outcome.
+type PairRequest = (String, tokio::sync::oneshot::Sender<Result<String, String>>);
+
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Device {
@@ -113,9 +116,14 @@ fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set; see scripts/relay-e2e.sh"))
 }
 
-/// The relay connection of one device: registers, then runs tunnels exactly like the app's
-/// relay task, until aborted.
-async fn relay_client(url: String, token: String, node: Arc<LanNode>) {
+/// The relay connection of one device: registers, then runs tunnels and pairs exactly like the
+/// app's relay task, until aborted.
+async fn relay_client(
+    url: String,
+    token: String,
+    node: Arc<LanNode>,
+    mut pair_requests: tokio::sync::mpsc::UnboundedReceiver<PairRequest>,
+) {
     let url = format!("{}/relay", url.replacen("http", "ws", 1));
     let (socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
     let (mut sink, mut stream) = socket.split();
@@ -134,6 +142,7 @@ async fn relay_client(url: String, token: String, node: Arc<LanNode>) {
 
     let (mut tunnels, mut pumped) = Tunnels::new();
     let mut dial = tokio::time::interval(Duration::from_millis(200));
+    let mut pairing: Option<PairRequest> = None;
     loop {
         tokio::select! {
             frame = stream.next() => match frame {
@@ -142,7 +151,20 @@ async fn relay_client(url: String, token: String, node: Arc<LanNode>) {
                         sink.send(Message::binary(reply)).await.unwrap();
                     }
                 }
-                Some(Ok(Message::Text(text))) => panic!("unexpected message from the relay: {text}"),
+                Some(Ok(Message::Text(text))) => {
+                    let reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(reply["type"], "devices", "unexpected message from the relay: {text}");
+                    let devices: Vec<String> =
+                        serde_json::from_value(reply["deviceIds"].clone()).unwrap();
+                    let (code, reply) = pairing.take().expect("a pairing request");
+                    let (frames, outcome) = tunnels.pair(&devices, &node, &code);
+                    for open in frames {
+                        sink.send(Message::binary(open)).await.unwrap();
+                    }
+                    tokio::spawn(async move {
+                        let _ = reply.send(outcome.await);
+                    });
+                }
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => return,
             },
@@ -151,6 +173,11 @@ async fn relay_client(url: String, token: String, node: Arc<LanNode>) {
                     sink.send(Message::binary(frame)).await.unwrap();
                 }
             }
+            Some(request) = pair_requests.recv() => {
+                    let json = serde_json::json!({ "type": "devices" });
+                    sink.send(Message::text(json.to_string())).await.unwrap();
+                    pairing = Some(request);
+                }
             _ = dial.tick() => {
                 for open in tunnels.dial(&node) {
                     sink.send(Message::binary(open)).await.unwrap();
@@ -174,38 +201,65 @@ fn clipboard_items_go_end_to_end_encrypted_through_the_relay() {
     let url = env("CLED_E2E_RELAY_URL");
     let (token_a, token_b) = (env("CLED_E2E_TOKEN_A"), env("CLED_E2E_TOKEN_B"));
 
-    // Three devices of user A, all paired with each other, and a device of user B that is paired
-    // with the Mac too: it holds a trusted key, but belongs to another account.
+    // Three devices of user A that have never been on the same network: they only ever reach
+    // each other through the relay, pairing included. And a device of user B that the Mac once
+    // paired with on a local network: it holds a trusted key, but belongs to another account.
     let mut mac = Device::new("mac");
     let mut fedora = Device::new("fedora");
-    let mut windows = Device::new("windows");
+    let windows = Device::new("windows");
     let mut other_user = Device::new("other-user");
-    for (a, b) in [
-        (&mac, &fedora),
-        (&mac, &windows),
-        (&fedora, &windows),
-        (&mac, &other_user),
-    ] {
-        pair(a, b);
-    }
-    for device in [&mut mac, &mut fedora, &mut windows, &mut other_user] {
-        device.restart();
-    }
+    pair(&mac, &other_user);
+    mac.restart();
+    other_user.restart();
     std::thread::sleep(Duration::from_millis(500));
-    assert!(!mac.online(&fedora), "still reachable directly");
+    assert!(!mac.online(&other_user), "still reachable directly");
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let connect = |device: &Device, token: &str| {
-        runtime.spawn(relay_client(
+        let (requests, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task = runtime.spawn(relay_client(
             url.clone(),
             token.to_owned(),
             Arc::clone(&device.node),
-        ))
+            receiver,
+        ));
+        (task, requests)
     };
-    let _mac_relay = connect(&mac, &token_a);
-    let _fedora_relay = connect(&fedora, &token_a);
-    let windows_relay = connect(&windows, &token_a);
-    let _other_relay = connect(&other_user, &token_b);
+    let (_mac_relay, mac_pair) = connect(&mac, &token_a);
+    let (_fedora_relay, fedora_pair) = connect(&fedora, &token_a);
+    let (windows_relay, windows_pair) = connect(&windows, &token_a);
+    let (_other_relay, other_pair) = connect(&other_user, &token_b);
+    std::thread::sleep(Duration::from_millis(500)); // Registered.
+
+    // `joiner` types the code `listener` shows. It doesn't say which device that is: every
+    // device of the account on the relay is tried, and only the one showing the code answers.
+    let pair_through_relay = |joiner: &tokio::sync::mpsc::UnboundedSender<PairRequest>,
+                              listener: &Device| {
+        let code = listener.node.start_pairing().unwrap().to_string();
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        joiner.send((code, reply)).unwrap();
+        runtime.block_on(outcome).unwrap()
+    };
+    assert_eq!(pair_through_relay(&fedora_pair, &mac).as_deref(), Ok("mac"));
+    assert_eq!(
+        pair_through_relay(&windows_pair, &mac).as_deref(),
+        Ok("mac")
+    );
+    assert_eq!(
+        pair_through_relay(&windows_pair, &fedora).as_deref(),
+        Ok("fedora")
+    );
+
+    // Another account can't pair with the Mac even with its code: the relay won't route there.
+    let refused = pair_through_relay(&other_pair, &mac);
+    assert!(refused.is_err(), "{refused:?}");
+    mac.node.cancel_pairing();
+    // A wrong code fails.
+    fedora.node.start_pairing().unwrap();
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    mac_pair.send(("ZZZZ-ZZZZ".into(), reply)).unwrap();
+    assert!(runtime.block_on(outcome).unwrap().is_err());
+    fedora.node.cancel_pairing();
 
     wait_until("user A's devices connected through the relay", || {
         mac.online(&fedora) && mac.online(&windows) && fedora.online(&windows)

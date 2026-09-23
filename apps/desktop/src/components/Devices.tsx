@@ -2,6 +2,7 @@ import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { onSyncChanged, removePeer, type SyncStatus, syncStatus } from "../lib/ipc";
 import { useTauriEvent } from "../lib/listen";
 import { PairingPanel } from "./PairingPanel";
+import { RelayJoin } from "./RelayJoin";
 import { Section } from "./Section";
 
 export function Devices() {
@@ -56,6 +57,8 @@ export function Devices() {
           </p>
         )}
 
+        {!status.unavailable && !pairing && <RelayJoin onPaired={refresh} />}
+
         {pairing && (
           <PairingPanel
             address={status.address}
@@ -72,7 +75,8 @@ export function Devices() {
 
         {!status.unavailable && status.peers.length === 0 && !pairing && (
           <p className="px-3 py-2.5 text-sm text-neutral-400">
-            No paired devices yet. Pair one on the same network to share your clipboard.
+            No paired devices yet. Pair one on the same network, or sign in to the same account in
+            relay mode on both.
           </p>
         )}
       </div>

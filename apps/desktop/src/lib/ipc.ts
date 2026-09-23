@@ -68,7 +68,7 @@ export function quitApp(): Promise<void> {
 
 /** Mirrors `Settings` in `src-tauri/src/settings.rs`. Stored in `<config dir>/settings.json`. */
 export type Settings = {
-  /** In relay mode the app connects to the relay, but clipboard items still sync over LAN only. */
+  /** In relay mode, paired devices also sync through the relay; LAN sync keeps running. */
   connectionMode: ConnectionMode;
   relayUrl: string;
 };
@@ -141,6 +141,25 @@ export function onRelayChanged(handler: (status: RelayStatus) => void): Promise<
 /** TEMPORARY. Resolves to how many of this account's other devices received the test message. */
 export function sendRelayTest(): Promise<number> {
   return invoke("send_relay_test");
+}
+
+/**
+ * Devices of this account on the relay that aren't paired with this one yet. Mirrors `JoinStatus`
+ * in `src-tauri/src/relay.rs`: of two such devices, one shows a code and the other asks for it.
+ */
+export type JoinStatus = { showCode: boolean; enterCode: boolean };
+
+export function relayJoinStatus(): Promise<JoinStatus> {
+  return invoke("relay_join_status");
+}
+
+export function onRelayJoin(handler: (status: JoinStatus) => void): Promise<UnlistenFn> {
+  return listen<JoinStatus>("relay:join", (event) => handler(event.payload));
+}
+
+/** Pairs through the relay with the device of this account showing `code`; resolves to its name. */
+export function pairThroughRelay(code: string): Promise<string> {
+  return invoke("pair_through_relay", { code });
 }
 
 /** A test message from another device signed in to the same account. */
