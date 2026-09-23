@@ -16,7 +16,9 @@ export type ClipboardChanged = {
   content: ClipboardPayload;
 };
 
-export type ItemOrigin = { kind: "thisDevice" } | { kind: "otherDevice"; deviceId: string };
+export type ItemOrigin =
+  | { kind: "thisDevice" }
+  | { kind: "otherDevice"; deviceId: string; name: string | null };
 
 export type SkippedReason =
   | { type: "sensitive" }
@@ -62,4 +64,54 @@ export function setAutostart(enabled: boolean): Promise<void> {
 
 export function quitApp(): Promise<void> {
   return invoke("quit");
+}
+
+export type SyncStatus = {
+  /** `null` when sync is running; otherwise why it isn't. */
+  unavailable: string | null;
+  deviceName: string;
+  /** For manual pairing, e.g. "192.168.1.20:43117". */
+  address: string | null;
+  peers: { id: string; name: string; online: boolean }[];
+};
+
+export type PairableDevice = { id: string; name: string; address: string };
+
+export function syncStatus(): Promise<SyncStatus> {
+  return invoke("sync_status");
+}
+
+export function startPairing(): Promise<string> {
+  return invoke("start_pairing");
+}
+
+export function cancelPairing(): Promise<void> {
+  return invoke("cancel_pairing");
+}
+
+export function pairableDevices(): Promise<PairableDevice[]> {
+  return invoke("pairable_devices");
+}
+
+/** Resolves to the paired device's name. */
+export function pairWith(address: string, code: string): Promise<string> {
+  return invoke("pair_with", { address, code });
+}
+
+export function removePeer(id: string): Promise<void> {
+  return invoke("remove_peer", { id });
+}
+
+export function onSyncChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen("sync:changed", () => handler());
+}
+
+/** A new pairing code replaced the shown one, or `null` when it expired. */
+export function onPairingCode(handler: (code: string | null) => void): Promise<UnlistenFn> {
+  return listen<string | null>("sync:pairing-code", (event) => handler(event.payload));
+}
+
+/** Pairing succeeded on the code-showing side; payload is the other device's name. */
+export function onPaired(handler: (name: string) => void): Promise<UnlistenFn> {
+  return listen<string>("sync:paired", (event) => handler(event.payload));
 }

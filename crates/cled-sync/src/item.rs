@@ -37,6 +37,11 @@ impl ContentHash {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// A hash received from another device. Use [`ClipboardItem::is_intact`] to check it.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 impl fmt::Debug for ContentHash {

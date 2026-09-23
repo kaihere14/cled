@@ -18,11 +18,14 @@ tauri-build = { version = "2.6", features = [] }
 tauri = { version = "2.11", features = ["tray-icon"] }
 base64 = "0.22"
 cled-clipboard = { path = "../../../crates/cled-clipboard" }
+cled-lan = { path = "../../../crates/cled-lan" }
 cled-sync = { path = "../../../crates/cled-sync" }
+gethostname = "1"
 # PNG only, for UI thumbnails. Already compiled in via arboard's image support.
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", windows))'.dependencies]
 tauri-plugin-autostart = "2.5"
+tauri-plugin-notification = "2.4"
 tauri-plugin-single-instance = "2.4"

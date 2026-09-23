@@ -1,0 +1,27 @@
+[package]
+name = "cled-lan"
+description = "Same-network sync for Cled: discovery, pairing, and encrypted connections"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+cled-clipboard = { path = "../cled-clipboard" }
+cled-sync = { path = "../cled-sync" }
+getrandom = "0.3"
+# PNG only: images travel as PNG and are decoded back to RGBA on arrival.
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"
+mdns-sd = "0.21"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only the primitives Cled uses (X25519, ChaCha20-Poly1305, BLAKE2s). Snow's default "std"
+# feature also pulls in `ring`, a C-compiled crypto library Cled doesn't need.
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-blake2", "use-chacha20poly1305", "use-curve25519", "use-getrandom"] }
+spake2 = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

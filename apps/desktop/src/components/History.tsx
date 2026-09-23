@@ -67,8 +67,11 @@ function Row({
           title="Copy again"
           className="flex w-full items-start gap-3 rounded-md px-2.5 py-2 text-left transition-[scale,background-color] duration-150 ease-out-strong hover:bg-neutral-100 active:scale-[0.99] dark:hover:bg-neutral-900"
         >
-          <span className="line-clamp-2 min-w-0 flex-1 font-mono text-sm break-words whitespace-pre-wrap">
-            {payload.text}
+          <span className="min-w-0 flex-1">
+            <span className="line-clamp-2 font-mono text-sm break-words whitespace-pre-wrap">
+              {payload.text}
+            </span>
+            <FromLabel entry={entry} />
           </span>
           {time}
         </button>
@@ -87,6 +90,7 @@ function Row({
               {payload.width}×{payload.height}
             </span>
           </div>
+          <FromLabel entry={entry} />
         </StaticRow>
       );
     case "skipped":
@@ -120,10 +124,24 @@ function originLabel(entry: HistoryEntry): string | undefined {
     case "thisDevice":
       return "Copied on this device";
     case "otherDevice":
-      return `Copied on another device (${entry.origin.deviceId.slice(0, 8)})`;
+      return `Copied on ${otherDeviceName(entry.origin)}`;
     default:
       return undefined;
   }
+}
+
+function otherDeviceName(origin: { name: string | null; deviceId: string }): string {
+  return origin.name ?? `a removed device (${origin.deviceId.slice(0, 8)})`;
+}
+
+/** Items from other devices say so on the row; items from this device don't need a label. */
+function FromLabel({ entry }: { entry: HistoryEntry }) {
+  if (entry.origin?.kind !== "otherDevice") return null;
+  return (
+    <span className="mt-0.5 block text-xs text-neutral-400">
+      from {otherDeviceName(entry.origin)}
+    </span>
+  );
 }
 
 /** Timestamp that briefly swaps to "Copied" after a re-copy, crossfading in place. */

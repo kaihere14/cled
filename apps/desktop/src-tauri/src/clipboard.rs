@@ -5,11 +5,15 @@ use cled_clipboard::{
     ChangeDetection, ClipboardBackend, ClipboardContent, ClipboardService, DEFAULT_POLL_INTERVAL,
     SkipReason, Snapshot,
 };
-use cled_sync::{ClipboardItem, DeviceId, LocalChange, SyncEngine};
+use std::sync::Arc;
+
+use cled_lan::LanNode;
+use cled_sync::{ClipboardItem, DeviceId, LocalChange};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::preview;
+use crate::sync::{SharedEngine, lock_engine, peer_name};
 
 /// Emitted to the UI whenever the system clipboard changes.
 const CHANGED_EVENT: &str = "clipboard:changed";
@@ -35,11 +39,13 @@ pub enum Origin {
     #[serde(rename_all = "camelCase")]
     OtherDevice {
         device_id: String,
+        /// `null` if the device is no longer paired.
+        name: Option<String>,
     },
 }
 
 impl ItemInfo {
-    fn new(item: &ClipboardItem, this_device: DeviceId) -> Self {
+    fn new(item: &ClipboardItem, this_device: DeviceId, node: Option<&LanNode>) -> Self {
         Self {
             id: item.id.to_string(),
             origin: if item.origin == this_device {
@@ -47,21 +53,35 @@ impl ItemInfo {
             } else {
                 Origin::OtherDevice {
                     device_id: item.origin.to_string(),
+                    name: node.and_then(|node| peer_name(node, item.origin)),
                 }
             },
         }
     }
 }
 
-/// Runs a clipboard change through the sync engine. Only real local copies would be broadcast
-/// once sync exists; echoes of remote writes are reported with their original origin.
-fn process_change(engine: &mut SyncEngine, snapshot: Snapshot) -> Option<ClipboardChanged> {
+/// Runs a clipboard change through the sync engine. Real local copies are sent to paired
+/// devices; echoes of received items are reported with their original device, and never sent.
+fn process_change(
+    engine: &SharedEngine,
+    node: Option<&LanNode>,
+    snapshot: Snapshot,
+) -> Option<ClipboardChanged> {
     let item = match &snapshot {
-        Snapshot::Content(content) => Some(match engine.on_local_change(content.clone()) {
-            LocalChange::Copied(item) | LocalChange::Echo(item) => {
-                ItemInfo::new(&item, engine.device())
-            }
-        }),
+        Snapshot::Content(content) => {
+            let mut engine = lock_engine(engine);
+            let device = engine.device();
+            Some(match engine.on_local_change(content.clone()) {
+                LocalChange::Copied(item) => {
+                    let info = ItemInfo::new(&item, device, node);
+                    if let Some(node) = node {
+                        node.broadcast(item);
+                    }
+                    info
+                }
+                LocalChange::Echo(item) => ItemInfo::new(&item, device, node),
+            })
+        }
         _ => None,
     };
     Some(ClipboardChanged {
@@ -122,10 +142,9 @@ impl ClipboardPayload {
 pub struct ClipboardState(Result<ClipboardService, String>);
 
 impl ClipboardState {
-    pub fn start(app: AppHandle, device: DeviceId) -> Self {
-        let mut engine = SyncEngine::new(device);
+    pub fn start(app: AppHandle, engine: SharedEngine, node: Option<Arc<LanNode>>) -> Self {
         let service = ClipboardService::spawn(DEFAULT_POLL_INTERVAL, move |snapshot| {
-            if let Some(payload) = process_change(&mut engine, snapshot)
+            if let Some(payload) = process_change(&engine, node.as_deref(), snapshot)
                 && let Err(err) = app.emit(CHANGED_EVENT, payload)
             {
                 eprintln!("failed to emit {CHANGED_EVENT}: {err}");
@@ -139,6 +158,13 @@ impl ClipboardState {
 
     fn service(&self) -> Result<&ClipboardService, String> {
         self.0.as_ref().map_err(Clone::clone)
+    }
+
+    /// Writes content received from another device.
+    pub fn write(&self, content: ClipboardContent) -> Result<(), String> {
+        self.service()?
+            .write(content)
+            .map_err(|err| err.to_string())
     }
 }
 

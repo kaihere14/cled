@@ -5,8 +5,9 @@
 Cled is an open-source, cross-platform clipboard synchronization app. Copy text or an image on one
 device and paste it on your other devices — Windows, macOS, and Linux (X11 and Wayland).
 
-> **Status: early development.** Cled can watch, read, and write the local clipboard (text and images) and skips content that password managers mark as private. Sync
-> between devices is not implemented yet. Nothing here is usable as a product.
+> **Status: early development.** Cled watches the clipboard (text and images), skips content
+> that password managers mark as private, and syncs between paired devices on the same local
+> network, end-to-end encrypted. Sync across different networks isn't implemented yet.
 
 ## Stack
 
@@ -22,6 +23,7 @@ apps/desktop/          Tauri desktop app
   src-tauri/           Rust entry point and Tauri glue
 crates/cled-clipboard/ Clipboard access and change detection (no Tauri dependency)
 crates/cled-sync/      Clipboard items and sync rules: loop prevention, deduplication
+crates/cled-lan/       Same-network sync: discovery, pairing, encrypted connections
 docs/                  Architecture and design documents
 ```
 
@@ -64,6 +66,12 @@ cargo run -p cled-clipboard --example clip -- watch          # print clipboard c
 cargo run -p cled-clipboard --example clip -- read
 cargo run -p cled-clipboard --example clip -- write "hello" --hold 5
 cargo run -p cled-clipboard --example clip -- write-image picture.png --hold 5
+```
+
+To test sync without a second computer, run a headless peer and pair it with the app:
+
+```sh
+cargo run -p cled-lan --example lan_peer -- /tmp/cled-peer   # then type: code
 ```
 
 See [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and

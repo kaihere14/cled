@@ -18,6 +18,9 @@ crates/cled-clipboard      Rust library, no Tauri dependency
 crates/cled-sync           Pure logic: clipboard items, device IDs, content hashes, and the
      │                     SyncEngine rules (echo suppression, dedup, newest wins)
      │
+crates/cled-lan            Same-network sync: mDNS discovery, pairing (SPAKE2 + Noise XXpsk3),
+     │                     encrypted sessions (Noise KK), wire format. Moves items; decides nothing.
+     │
 apps/desktop/src-tauri     Tauri glue only: commands, events, payload types, device ID file
      │   commands: clipboard_status, read_clipboard, write_clipboard
      │   event:    clipboard:changed
@@ -200,6 +203,41 @@ to its clipboard.
   Disabling echo suppression makes these tests fail with "sync loop", so they do catch loops.
 - `tests/real_clipboard.rs` (opt-in, `-- --ignored`): a remote item is written through the
   real clipboard and must come back as `Echo`.
+
+## cled-lan
+
+The design, security model, and wire format are in
+[RFC 0001: Same-network sync](rfcs/0001-lan-sync.md). In code:
+
+| Module | Role |
+| --- | --- |
+| `node` | `LanNode`: runs on its own small Tokio runtime. Accepts and dials connections, runs pairing, keeps one connection per paired device, sends items, and reports `Event`s on a channel. Its methods block briefly and can be called from any thread. |
+| `noise` | Noise handshakes and the encrypted channel (chunked messages, length-checked before allocation) |
+| `discovery` | mDNS announce/browse. The device name is announced only while pairing. |
+| `wire` | Message types and postcard encoding. Images travel as PNG and are decoded with a memory limit. |
+| `peers` | `peers.json`: paired devices and recently removed ones, written atomically |
+| `keys` | The device's X25519 key pair in `identity.key` (mode 0600 on Unix) |
+| `code` | 8-character Crockford base32 pairing codes |
+
+The desktop app (`src-tauri/src/sync.rs`) shares one `SyncEngine` between the clipboard watcher
+and the network:
+
+- Local copies go through the engine; `Copied` items are broadcast.
+- Received items go through `on_remote_item`; `Write` content is written with the
+  `ClipboardService`.
+- That write comes back through the watcher as an `Echo`, which is never re-sent.
+
+### Tests
+
+- Unit tests: codes, keys, the peer store, the wire format, PNG round trips, size limits.
+- `tests/lan.rs`: real nodes over localhost TCP:
+  - pairing, including wrong codes and code replacement after 3 failures
+  - one-time codes
+  - items and images both ways
+  - an impostor with a paired device's ID but not its key
+  - removal notices
+  - reconnection after restart
+- `examples/lan_peer.rs`: a headless peer for manual testing against the desktop app.
 
 ## Desktop app (Tauri)
 

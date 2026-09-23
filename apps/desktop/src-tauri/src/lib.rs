@@ -2,6 +2,7 @@ mod background;
 mod clipboard;
 mod device;
 mod preview;
+mod sync;
 
 use tauri::{Manager, RunEvent};
 
@@ -10,10 +11,17 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(background::single_instance_plugin())
         .plugin(background::autostart_plugin())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let device = device::load_or_create(app.handle());
-            let state = clipboard::ClipboardState::start(app.handle().clone(), device);
-            app.manage(state);
+            let sync = sync::SyncState::start(app.handle(), device);
+            let clipboard = clipboard::ClipboardState::start(
+                app.handle().clone(),
+                std::sync::Arc::clone(&sync.engine),
+                sync.node().cloned(),
+            );
+            app.manage(clipboard);
+            app.manage(sync);
             background::setup(app)?;
             Ok(())
         })
@@ -25,6 +33,12 @@ pub fn run() {
             background::get_autostart,
             background::set_autostart,
             background::quit,
+            sync::sync_status,
+            sync::start_pairing,
+            sync::cancel_pairing,
+            sync::pairable_devices,
+            sync::pair_with,
+            sync::remove_peer,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

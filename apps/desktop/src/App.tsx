@@ -1,4 +1,5 @@
 import { CurrentClipboard } from "./components/CurrentClipboard";
+import { Devices } from "./components/Devices";
 import { History } from "./components/History";
 import { LimitedNotice } from "./components/LimitedNotice";
 import { Settings } from "./components/Settings";
@@ -20,6 +21,7 @@ export function App() {
 
       <CurrentClipboard content={current} />
       <WriteForm onWrite={write} disabled={status?.state !== "watching"} />
+      <Devices />
       <Settings />
       <History entries={history} onCopy={write} />
     </main>
