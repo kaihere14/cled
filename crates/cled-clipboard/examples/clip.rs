@@ -5,6 +5,7 @@
 //! cargo run -p cled-clipboard --example clip -- read
 //! cargo run -p cled-clipboard --example clip -- write "hello" [--hold SECONDS]
 //! cargo run -p cled-clipboard --example clip -- write-image picture.png [--hold SECONDS]
+//! cargo run -p cled-clipboard --example clip -- write-keep "hello"   # stays after exit
 //! ```
 //!
 //! Set `RUST_LOG=debug` (or `RUST_LOG=arboard=trace`) to see which backend is used.
@@ -17,6 +18,9 @@ use cled_clipboard::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if cled_clipboard::run_holder_if_requested() {
+        return Ok(());
+    }
     env_logger::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     print_environment();
@@ -39,6 +43,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let text = args.get(1).ok_or("usage: write <text> [--hold SECONDS]")?;
             write_and_hold(ClipboardContent::text(text), hold)
         }
+        Some("write-keep") => {
+            let text = args.get(1).ok_or("usage: write-keep <text>")?;
+            let service = ClipboardService::spawn(DEFAULT_POLL_INTERVAL, |_| {})?;
+            service.write(ClipboardContent::text(text))?;
+            let handed_off = service.keep_content_after_exit()?;
+            println!("wrote {text:?}; holder started: {handed_off}");
+            Ok(())
+        }
         Some("write-image") => {
             let path = args
                 .get(1)
@@ -51,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "usage: clip <watch | read | write <text> | write-image <file.png>> [--hold SECONDS]"
+                "usage: clip <watch | read | write <text> | write-keep <text> | write-image <file.png>> [--hold SECONDS]"
             );
             std::process::exit(2);
         }

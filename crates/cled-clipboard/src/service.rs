@@ -22,6 +22,7 @@ enum Request {
     Write(ClipboardContent, Sender<Result<()>>),
     /// Sent by the platform watcher when the clipboard may have changed.
     Changed,
+    KeepAfterExit(Sender<Result<bool>>),
     Stop,
 }
 
@@ -121,6 +122,20 @@ impl ClipboardService {
             .map_err(|_| ClipboardError::ServiceStopped)?
     }
 
+    /// Call right before the app exits. If what's on the clipboard is still content written
+    /// through this service, and the platform would lose it when this process exits (Linux),
+    /// hands it to a holder process so it stays pasteable. Returns whether a holder took over.
+    /// Blocks for up to 2 s while the holder starts.
+    ///
+    /// The executable must call [`crate::run_holder_if_requested`] at the start of `main`.
+    pub fn keep_content_after_exit(&self) -> Result<bool> {
+        let (reply, response) = mpsc::channel();
+        self.send(Request::KeepAfterExit(reply))?;
+        response
+            .recv()
+            .map_err(|_| ClipboardError::ServiceStopped)?
+    }
+
     fn send(&self, request: Request) -> Result<()> {
         self.requests
             .send(request)
@@ -150,6 +165,7 @@ fn run<F>(
     detector.baseline(&clipboard.read().unwrap_or(Snapshot::Empty));
 
     let mut last_error: Option<String> = None;
+    let mut last_written: Option<ClipboardContent> = None;
     let mut schedule = Schedule::new(Instant::now(), interval);
 
     loop {
@@ -161,7 +177,14 @@ fn run<F>(
                 let _ = reply.send(clipboard.read());
             }
             Ok(Request::Write(content, reply)) => {
-                let _ = reply.send(clipboard.write(&content));
+                let result = clipboard.write(&content);
+                if result.is_ok() {
+                    last_written = Some(content);
+                }
+                let _ = reply.send(result);
+            }
+            Ok(Request::KeepAfterExit(reply)) => {
+                let _ = reply.send(keep_after_exit(&mut clipboard, last_written.as_ref()));
             }
             Ok(Request::Changed) => schedule.notified(Instant::now()),
             Ok(Request::Stop) | Err(RecvTimeoutError::Disconnected) => break,
@@ -195,6 +218,24 @@ fn run<F>(
             }
         }
     }
+}
+
+fn keep_after_exit(
+    clipboard: &mut Clipboard,
+    last_written: Option<&ClipboardContent>,
+) -> Result<bool> {
+    if !crate::platform::CONTENT_DIES_WITH_PROCESS {
+        return Ok(false);
+    }
+    let Some(written) = last_written else {
+        return Ok(false);
+    };
+    // Only hand off if nothing else was copied since Cled wrote.
+    if !matches!(clipboard.read()?, Snapshot::Content(current) if &current == written) {
+        return Ok(false);
+    }
+    crate::holder::spawn(written)
+        .map_err(|err| ClipboardError::Other(format!("failed to start clipboard holder: {err}")))
 }
 
 /// When the next clipboard check is due: `interval` after the last check, or shortly after a

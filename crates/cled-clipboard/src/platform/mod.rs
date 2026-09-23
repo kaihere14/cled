@@ -29,6 +29,17 @@ mod os;
 pub(crate) use self::arboard::Backend;
 pub(crate) use self::os::Native;
 
+/// Whether clipboard content dies with the process that set it (X11 and Wayland), so Cled must
+/// hand it to a holder process before exiting.
+pub(crate) const CONTENT_DIES_WITH_PROCESS: bool = cfg!(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        target_os = "android",
+        target_os = "emscripten"
+    ))
+));
+
 /// Called from a watcher thread when the clipboard may have changed. Returns `false` once the
 /// receiver is gone, telling the watcher to stop.
 pub(crate) type Notify = Box<dyn Fn() -> bool + Send + 'static>;

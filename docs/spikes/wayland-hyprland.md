@@ -37,7 +37,7 @@ terminal alongside `wl-copy` / `wl-paste`.
 
 - ~~M3: report the active backend to the UI.~~ Done.
 - ~~M3: repeat this spike on GNOME.~~ Partly done, see [GNOME spike](gnome.md). KDE still unverified.
-- M4: decide whether clipboard content should outlive the Cled process.
+- M4: decided (2026-09-23) that content Cled wrote should stay pasteable after Cled quits.
 
 ## Addendum (M2): images and privacy hints
 

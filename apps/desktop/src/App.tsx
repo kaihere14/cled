@@ -1,6 +1,7 @@
 import { CurrentClipboard } from "./components/CurrentClipboard";
 import { History } from "./components/History";
 import { LimitedNotice } from "./components/LimitedNotice";
+import { Settings } from "./components/Settings";
 import { StatusBadge } from "./components/StatusBadge";
 import { WriteForm } from "./components/WriteForm";
 import { useClipboard } from "./lib/useClipboard";
@@ -19,6 +20,7 @@ export function App() {
 
       <CurrentClipboard content={current} />
       <WriteForm onWrite={write} disabled={status?.state !== "watching"} />
+      <Settings />
       <History entries={history} onCopy={write} />
     </main>
   );

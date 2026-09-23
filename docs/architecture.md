@@ -134,6 +134,29 @@ the watcher's blocking event loop independent of reads and writes.
 | Cled CPU while idle | ~0.1% of a core | not measurable (0 ticks in 20 s) |
 | Work the source app does for Cled while idle | Re-sends the full PNG twice a second (~6 MB/s) | Once per safety check (every 5 s) |
 
+### Keeping content after Cled exits
+
+On Linux (X11 and Wayland), clipboard content lives in the process that set it. Without extra
+work, whatever Cled copied would vanish when Cled quits. On exit, the desktop app calls
+`ClipboardService::keep_content_after_exit`, which hands the content to a **holder**: the same
+executable, started with `--cled-hold-clipboard` (`HOLDER_ARG`). `main` checks for that argument
+before anything else and never starts the UI in holder mode.
+
+The hand-off is designed so the holder never overwrites a newer copy:
+
+1. It only happens if the clipboard still shows content Cled wrote.
+2. The holder receives the content on stdin and checks that the clipboard still shows it. If
+   something newer was copied, it exits without touching the clipboard.
+3. The holder takes over the clipboard and prints `ready`. Cled waits for that (up to 2 s)
+   before exiting.
+4. The holder watches the clipboard with the same change notifications as Cled and exits as
+   soon as anything else is copied.
+
+Windows and macOS keep clipboard content themselves, so no holder is started there.
+
+Known gap: if the clipboard is cleared rather than replaced, the holder keeps running until the
+next copy.
+
 ## Desktop app (Tauri)
 
 | Interface | Direction | Shape |
@@ -141,6 +164,8 @@ the watcher's blocking event loop independent of reads and writes.
 | `clipboard_status` | UI → Rust | `{ state: "watching", backend, changeDetection, limited }` or `{ state: "unavailable", reason }` |
 | `read_clipboard` | UI → Rust | `ClipboardPayload \| null` |
 | `write_clipboard(text)` | UI → Rust | `void` or error string |
+| `get_autostart` / `set_autostart(enabled)` | UI → Rust | `boolean` / `void` |
+| `quit` | UI → Rust | Exits (with the clipboard hand-off) |
 | `clipboard:changed` | Rust → UI | `ClipboardPayload` |
 
 `ClipboardPayload` is one of:
@@ -155,6 +180,21 @@ Commands run off the UI thread (`#[tauri::command(async)]`) because clipboard ca
 
 If the clipboard service can't start, the app still opens and reports the reason in the UI.
 
+### Background operation
+
+| Behavior | How |
+| --- | --- |
+| Tray icon with "Show Cled" / "Quit Cled" | Tauri's `tray-icon` feature. On Linux it needs a StatusNotifierItem host (e.g. waybar's tray module, KDE, GNOME with the AppIndicator extension). |
+| Closing the window hides it; Cled keeps running | `CloseRequested` is intercepted in `background.rs` |
+| Launching Cled again shows the existing window | `tauri-plugin-single-instance` |
+| Start on login (off by default) | `tauri-plugin-autostart`. Login launches pass `--hidden`, so Cled starts in the tray without its window. The window is created hidden and shown in `setup` unless `--hidden` was passed, which avoids a flash. |
+| Quit | The tray menu or the Quit button in Settings. Both run the exit hand-off above. |
+
+Autostart is toggled through Cled's own `get_autostart` / `set_autostart` commands, not the
+plugin's JavaScript API, so the UI needs no extra permissions.
+
+Without a tray host, a hidden window can still be brought back by launching Cled again.
+
 History shown in the UI is in memory only and disappears when the app closes.
 
 ## Known limitations
@@ -164,5 +204,4 @@ History shown in the UI is in memory only and disappears when the app closes.
   [GNOME spike](spikes/gnome.md).
 - Images in history can't be copied again from the UI. Only thumbnails are kept, and full-size
   history storage comes later.
-- Content written by Cled disappears from the clipboard when Cled exits on Linux.
-- No sync, persistence, or background/tray mode.
+- No sync or history persistence.

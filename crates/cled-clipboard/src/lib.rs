@@ -11,6 +11,7 @@ mod backend;
 mod content;
 mod detector;
 mod error;
+mod holder;
 mod platform;
 mod service;
 mod snapshot;
@@ -18,6 +19,7 @@ mod snapshot;
 pub use backend::{BackendInfo, ChangeDetection, ClipboardBackend};
 pub use content::{ClipboardContent, Image};
 pub use error::{ClipboardError, Result};
+pub use holder::{HOLDER_ARG, run_holder_if_requested};
 pub use service::{ClipboardService, DEFAULT_POLL_INTERVAL};
 pub use snapshot::{MAX_IMAGE_BYTES, SkipReason, Snapshot};
 

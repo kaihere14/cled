@@ -42,3 +42,15 @@ export function onClipboardChanged(
 ): Promise<UnlistenFn> {
   return listen<ClipboardPayload>("clipboard:changed", (event) => handler(event.payload));
 }
+
+export function getAutostart(): Promise<boolean> {
+  return invoke("get_autostart");
+}
+
+export function setAutostart(enabled: boolean): Promise<void> {
+  return invoke("set_autostart", { enabled });
+}
+
+export function quitApp(): Promise<void> {
+  return invoke("quit");
+}

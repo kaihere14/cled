@@ -2,6 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // When started as a clipboard holder (see `cled_clipboard::HOLDER_ARG`), keep serving the
+    // content Cled handed over and exit; never start the UI.
+    if cled_clipboard::run_holder_if_requested() {
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     work_around_webkitgtk_dmabuf();
 

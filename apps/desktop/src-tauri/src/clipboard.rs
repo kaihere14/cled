@@ -6,7 +6,7 @@ use cled_clipboard::{
     SkipReason, Snapshot,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::preview;
 
@@ -81,6 +81,18 @@ impl ClipboardState {
 
     fn service(&self) -> Result<&ClipboardService, String> {
         self.0.as_ref().map_err(Clone::clone)
+    }
+}
+
+/// Keeps what Cled last copied pasteable after Cled exits (Linux). Call on app exit.
+pub fn keep_content_after_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<ClipboardState>() else {
+        return;
+    };
+    if let Ok(service) = state.service()
+        && let Err(err) = service.keep_content_after_exit()
+    {
+        eprintln!("could not keep clipboard content after exit: {err}");
     }
 }
 
