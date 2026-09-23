@@ -34,9 +34,13 @@ export function useClipboard() {
       setCurrent(payload);
       setHistory((entries) => {
         // Re-copying text already in history moves it to the top instead of duplicating it.
+        // Trailing whitespace doesn't count, matching how Cled identifies content.
+        const same = (a: string, b: string) => a.trimEnd() === b.trimEnd();
         const rest =
           payload.kind === "text"
-            ? entries.filter((e) => !(e.payload.kind === "text" && e.payload.text === payload.text))
+            ? entries.filter(
+                (e) => !(e.payload.kind === "text" && same(e.payload.text, payload.text)),
+              )
             : entries;
         const entry = {
           key: item?.id ?? `local-${nextLocalKey++}`,

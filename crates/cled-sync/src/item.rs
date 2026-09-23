@@ -8,7 +8,9 @@ use crate::{DeviceId, ItemId};
 /// A stable identity for clipboard content: BLAKE3 over the normalized content.
 ///
 /// `cled-clipboard` already normalizes content (text uses `\n` line endings; images are RGBA
-/// pixels), so the same copy hashes the same on every OS and across restarts. Unlike the
+/// pixels), so the same copy hashes the same on every OS and across restarts. Trailing
+/// whitespace in text is ignored, matching the clipboard crate's change detection, so copies
+/// that differ only in trailing spaces or newlines are the same item everywhere. Unlike the
 /// clipboard crate's internal fingerprint, this is safe to store and send to other devices.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentHash([u8; 32]);
@@ -20,7 +22,7 @@ impl ContentHash {
         match content {
             ClipboardContent::Text(text) => {
                 hasher.update(b"cled:text\0");
-                hasher.update(text.as_bytes());
+                hasher.update(ClipboardContent::identity_text(text).as_bytes());
             }
             ClipboardContent::Image(image) => {
                 hasher.update(b"cled:image\0");
@@ -103,6 +105,18 @@ mod tests {
         assert_eq!(
             ContentHash::of(&text("a\r\nb")),
             ContentHash::of(&text("a\nb"))
+        );
+    }
+
+    #[test]
+    fn hash_ignores_trailing_whitespace() {
+        assert_eq!(
+            ContentHash::of(&text("mt ja")),
+            ContentHash::of(&text("mt ja \n"))
+        );
+        assert_ne!(
+            ContentHash::of(&text("mt ja")),
+            ContentHash::of(&text(" mt ja"))
         );
     }
 

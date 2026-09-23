@@ -50,14 +50,22 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           # Tags with a suffix (v0.1.0-build.7, v0.2.0-beta) are pre-releases.
-          prerelease=""
-          [[ "$TAG" == *-* ]] && prerelease="--prerelease"
-          gh release create "$TAG" --draft $prerelease \
-            --target "$GITHUB_SHA" \
-            --title "Cled $TAG" \
-            --notes-file .github/release-notes.md
-          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
-            --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          prerelease=false
+          [[ "$TAG" == *-* ]] && prerelease=true
+          # Take the ID from the create call itself; listing releases right after creating a
+          # draft can miss it.
+          id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            -f name="Cled $TAG" \
+            -F body=@.github/release-notes.md \
+            -F draft=true \
+            -F prerelease="$prerelease" \
+            --jq .id)
+          if [[ -z "$id" ]]; then
+            echo "::error::Could not create the release"
+            exit 1
+          fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   bundle:
@@ -124,4 +132,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.create-release.outputs.tag }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+        run: |
+          # Never publish a release without installers.
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --jq 'map(.name) | join("\n")')
+          echo "Assets:"; echo "$assets"
+          for pattern in '\.deb$' '\.rpm$' '\.AppImage$' '\.msi$' '-setup\.exe$' '\.dmg$'; do
+            if ! grep -qE -- "$pattern" <<< "$assets"; then
+              echo "::error::Missing installer matching $pattern; leaving the release as a draft"
+              exit 1
+            fi
+          done
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false --silent
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"

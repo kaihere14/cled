@@ -260,6 +260,17 @@ mod tests {
     }
 
     #[test]
+    fn echo_is_recognized_when_the_os_adds_a_trailing_newline() {
+        let mut engine = SyncEngine::new(DeviceId::new_random());
+        let item = remote_item(DeviceId::new_random(), "from afar");
+        engine.on_remote_item(item.clone());
+        assert_eq!(
+            engine.on_local_change(text("from afar\n")),
+            LocalChange::Echo(item)
+        );
+    }
+
+    #[test]
     fn older_items_lose_to_the_clipboard() {
         let mut engine = SyncEngine::new(DeviceId::new_random());
         let mut old = remote_item(DeviceId::new_random(), "old");

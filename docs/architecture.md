@@ -64,8 +64,17 @@ apps/desktop/src           React UI: renders state, calls commands, listens to e
 ### Text normalization
 
 Text is normalized to `\n` line endings when read or written. Windows uses `\r\n`, so without
-this the same text would look different on each OS. That matters for change detection now and
-for recognizing sync echoes later.
+this the same text would look different on each OS. That matters for change detection and for
+recognizing sync echoes.
+
+**Trailing whitespace doesn't count for identity.** Text that differs only in trailing spaces,
+tabs, or newlines counts as the same content, for change detection, for the sync content hash,
+and for history. Selecting a line with or without its trailing space is the same copy to a
+person, and some apps and OSes add or drop trailing newlines. The text itself is kept exactly as
+copied: nothing is trimmed from what gets pasted.
+
+Text is never "repaired". If an app puts a replacement character (`�`) on the clipboard, Cled
+syncs it as is.
 
 ### Images
 

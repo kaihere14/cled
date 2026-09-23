@@ -3,7 +3,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 /// Content Cled knows how to read from and write to the clipboard.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Hashing ignores trailing whitespace in text (see the `Hash` impl), so copies that differ only
+/// in trailing spaces or newlines count as the same content for change detection. Equality
+/// compares exact text.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClipboardContent {
     /// UTF-8 text with line endings normalized to `\n`.
@@ -11,7 +15,30 @@ pub enum ClipboardContent {
     Image(Image),
 }
 
+impl std::hash::Hash for ClipboardContent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            // Selecting text with or without a trailing space or newline is the same copy to a
+            // person, and apps and OSes add or drop trailing newlines. Content keeps them;
+            // identity doesn't. `a == b` still implies equal hashes, as `Hash` requires.
+            Self::Text(text) => {
+                0u8.hash(state);
+                text.trim_end().hash(state);
+            }
+            Self::Image(image) => {
+                1u8.hash(state);
+                image.hash(state);
+            }
+        }
+    }
+}
+
 impl ClipboardContent {
+    /// Text as used for identity: trailing whitespace removed. See the `Hash` impl.
+    pub fn identity_text(text: &str) -> &str {
+        text.trim_end()
+    }
+
     /// Creates text content, normalizing line endings.
     ///
     /// Windows stores clipboard text with `\r\n`; other platforms use `\n`. Normalizing means the
@@ -111,9 +138,24 @@ mod tests {
     }
 
     #[test]
+    fn trailing_whitespace_does_not_change_the_fingerprint() {
+        let base = fingerprint(&ClipboardContent::text("hello world"));
+        for variant in ["hello world ", "hello world\n", "hello world \t\n\n"] {
+            assert_eq!(
+                fingerprint(&ClipboardContent::text(variant)),
+                base,
+                "{variant:?}"
+            );
+        }
+        // Leading and inner whitespace still matter.
+        assert_ne!(fingerprint(&ClipboardContent::text(" hello world")), base);
+        assert_ne!(fingerprint(&ClipboardContent::text("hello  world")), base);
+    }
+
+    #[test]
     fn different_text_has_different_fingerprint() {
         let a = ClipboardContent::text("hello");
-        let b = ClipboardContent::text("hello ");
+        let b = ClipboardContent::text("hello!");
         assert_ne!(fingerprint(&a), fingerprint(&b));
     }
 

@@ -82,6 +82,15 @@ mod tests {
     }
 
     #[test]
+    fn trailing_whitespace_only_difference_is_not_a_change() {
+        let mut detector = ChangeDetector::default();
+        detector.baseline(&text("kidhr jaa rha hai ladle"));
+        assert!(!detector.observe(&text("kidhr jaa rha hai ladle ")));
+        assert!(!detector.observe(&text("kidhr jaa rha hai ladle\n")));
+        assert!(detector.observe(&text("kidhr jaa rha hai ladle mt ja")));
+    }
+
+    #[test]
     fn image_changes_are_detected_by_pixels() {
         let mut detector = ChangeDetector::default();
         detector.baseline(&image(0));
