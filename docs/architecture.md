@@ -219,7 +219,7 @@ The design, security model, and wire format are in
 | Module | Role |
 | --- | --- |
 | `node` | `LanNode`: runs on its own small Tokio runtime. Accepts and dials connections, runs pairing, keeps one connection per paired device, sends items, and reports `Event`s on a channel. Its methods block briefly and can be called from any thread. |
-| `noise` | Noise handshakes and the encrypted channel (chunked messages, length-checked before allocation) |
+| `noise` | Noise handshakes and the encrypted channel (chunked messages, length-checked before allocation). Works over any ordered byte stream. |
 | `discovery` | mDNS announce/browse. The device name is announced only while pairing. |
 | `wire` | Message types and postcard encoding. Images travel as PNG and are decoded with a memory limit. |
 | `peers` | `peers.json`: paired devices and recently removed ones, written atomically |
@@ -244,7 +244,20 @@ and the network:
   - an impostor with a paired device's ID but not its key
   - removal notices
   - reconnection after restart
+- `tests/tunnel.rs`: sessions over a tunnel through a stand-in relay that only copies bytes: items
+  and images both ways, no plaintext in anything it forwards, a tampered byte ends the session
+  without delivering the item, a relay can't impersonate a paired device, reconnection.
 - `examples/lan_peer.rs`: a headless peer for manual testing against the desktop app.
+
+### Transports
+
+A session (Noise `KK` handshake, `Hello`, items) runs over any ordered, reliable byte stream
+(`Transport`). Direct TCP is one; a tunnel through the relay is the other. `LanNode::connect_over`
+and `LanNode::accept_over` start a session over a stream someone else opened, and
+`LanNode::should_connect` applies the same "lower ID dials" rule as direct connections. Both
+transports register the same kind of connection, so broadcasting, receiving, and the `SyncEngine`
+path don't know which one an item used. If both are available, the first session to a device
+wins, as with duplicate TCP connections. Pairing is only possible over direct TCP.
 
 ## Desktop app (Tauri)
 
@@ -309,19 +322,31 @@ History shown in the UI is in memory only and disappears when the app closes.
 file fall back to the defaults, so older installations need no migration. The relay URL is
 validated in Rust before it is saved; an invalid one is rejected and the saved one kept.
 
-Relay sync isn't implemented yet. The mode is only stored: LAN sync runs as before in either
-mode, and the UI says so when Relay is selected.
+In LAN mode only the local network is used. In relay mode, LAN sync keeps running and paired
+devices signed in to the same account also connect through the relay (see below).
 
 ## Relay server (early development)
 
-`apps/relay` is a standalone Node.js + TypeScript server (Fastify, WebSocket) that will route
-encrypted payloads between devices on different networks. It runs on a server, is not bundled
-with the desktop app, and shares no code with the Rust workspace. The desktop app doesn't connect
-to it yet.
+`apps/relay` is a standalone Node.js + TypeScript server (Fastify, WebSocket) that routes
+encrypted traffic between devices on different networks. It runs on a server, is not bundled
+with the desktop app, and shares no code with the Rust workspace.
 
-Devices encrypt before sending and decrypt after receiving; the relay only forwards opaque bytes
-and never has the keys. Today it has a health endpoint and a WebSocket endpoint that accepts
-connections and drops messages. See [apps/relay/README.md](../apps/relay/README.md).
+Devices register with a Clerk access token; the relay takes the user from the verified token.
+Clipboard items then travel in **tunnels**: ordered byte streams between two devices of the same
+user, carried in binary WebSocket frames (`src-tauri/src/tunnel.rs`, and
+`apps/relay/src/features/relay/tunnel.ts` for the frame format). The paired devices run the same
+Noise `KK` session through a tunnel as over the local network, so the relay only sees ciphertext
+and never has a key. It reads a frame header (kind, tunnel ID, device ID) to route, forwards the
+data unchanged, and answers frames for devices that aren't connected (or belong to another user)
+with a `close`.
+
+The relay connection task (`src-tauri/src/relay.rs`) opens a tunnel every 5 s to each paired
+device it should dial and isn't connected to, and hands tunnels other devices open to the node.
+Dropping the relay connection closes every tunnel.
+
+`scripts/relay-e2e.sh` runs a real relay with a stand-in Clerk instance and sends text and images
+between four nodes that can only reach each other through it, checking that nothing the relay
+received or logged contains clipboard content. See [apps/relay/README.md](../apps/relay/README.md).
 
 ## Known limitations
 
@@ -330,4 +355,5 @@ connections and drops messages. See [apps/relay/README.md](../apps/relay/README.
   [GNOME spike](spikes/gnome.md).
 - Images in history can't be copied again from the UI. Only thumbnails are kept, and full-size
   history storage comes later.
-- History is not persisted, and sync works only between devices on the same network.
+- History is not persisted.
+- Devices must be paired on the same network once before they can sync through the relay.

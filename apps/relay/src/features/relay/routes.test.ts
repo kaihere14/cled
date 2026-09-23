@@ -10,6 +10,13 @@ import type { DeviceId } from "./identity.ts";
 import { type ServerMessage, serverMessageSchema } from "./protocol.ts";
 import { ConnectionRegistry } from "./registry.ts";
 import { AUTH_TIMEOUT_CLOSE_CODE, REPLACED_CLOSE_CODE, UNAUTHORIZED_CLOSE_CODE } from "./routes.ts";
+import {
+  encodeTunnelFrame,
+  FLAG_OPENER,
+  parseTunnelFrame,
+  type TunnelFrame,
+  TunnelKind,
+} from "./tunnel.ts";
 
 const user = (id: string) => id as UserId;
 const device = (id: string) => id as DeviceId;
@@ -22,6 +29,12 @@ interface Client {
   send(message: unknown): void;
   /** The next message from the relay, validated against the protocol. */
   next(): Promise<ServerMessage>;
+  /** Sends a binary tunnel frame. */
+  sendFrame(frame: Omit<TunnelFrame, "data"> & { data?: Buffer }): void;
+  /** The next binary tunnel frame from the relay. */
+  nextFrame(): Promise<TunnelFrame>;
+  /** Tunnel frames received and not yet taken with `nextFrame`. */
+  readonly queuedFrames: number;
   /** Resolves with the close code once the relay closes the connection. */
   closed: Promise<number>;
 }
@@ -40,31 +53,56 @@ async function setup(t: TestContext, options: ServerOptions & { logLevel?: strin
   return { app, connections };
 }
 
+/** A queue of things the relay sent, which tests await one at a time. */
+function inbox<T>() {
+  const queued: T[] = [];
+  const waiting: ((item: T) => void)[] = [];
+  return {
+    push(item: T) {
+      const waiter = waiting.shift();
+      if (waiter) waiter(item);
+      else queued.push(item);
+    },
+    next(): Promise<T> {
+      if (queued.length > 0) return Promise.resolve(queued.shift() as T);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("nothing from the relay")), 1000);
+        waiting.push((item) => {
+          clearTimeout(timer);
+          resolve(item);
+        });
+      });
+    },
+    get size() {
+      return queued.length;
+    },
+  };
+}
+
 async function connect(app: FastifyInstance): Promise<Client> {
   const socket = await app.injectWS("/relay");
-  const queued: ServerMessage[] = [];
-  const waiting: ((message: ServerMessage) => void)[] = [];
+  const messages = inbox<ServerMessage>();
+  const frames = inbox<TunnelFrame>();
 
-  socket.on("message", (data: Buffer) => {
-    const message = serverMessageSchema.parse(JSON.parse(data.toString("utf8")));
-    const waiter = waiting.shift();
-    if (waiter) waiter(message);
-    else queued.push(message);
+  socket.on("message", (data: Buffer, isBinary: boolean) => {
+    if (isBinary) {
+      const frame = parseTunnelFrame(data);
+      assert.ok(frame, "the relay sent an invalid tunnel frame");
+      frames.push(frame);
+    } else {
+      messages.push(serverMessageSchema.parse(JSON.parse(data.toString("utf8"))));
+    }
   });
 
   return {
     socket,
     send: (message) => socket.send(typeof message === "string" ? message : JSON.stringify(message)),
-    next: () => {
-      const message = queued.shift();
-      if (message) return Promise.resolve(message);
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("no message from the relay")), 1000);
-        waiting.push((message) => {
-          clearTimeout(timer);
-          resolve(message);
-        });
-      });
+    next: () => messages.next(),
+    sendFrame: (frame) =>
+      socket.send(encodeTunnelFrame({ data: Buffer.alloc(0), ...frame }), { binary: true }),
+    nextFrame: () => frames.next(),
+    get queuedFrames() {
+      return frames.size;
     },
     closed: new Promise((resolve) => socket.once("close", resolve)),
   };
@@ -196,7 +234,7 @@ test("malformed input gets an error and doesn't crash the relay", async (t) => {
 
   client.socket.send(Buffer.from([0, 1, 2]), { binary: true });
   const binary = await client.next();
-  assert.equal(binary.type === "error" && binary.code, "invalid_json");
+  assert.equal(binary.type === "error" && binary.code, "not_registered");
 
   client.send({ type: "message", message: "hi" });
   const unregistered = await client.next();
@@ -341,6 +379,22 @@ test("tokens, secrets, and message contents never reach the logs", async (t) => 
   const linux = await register(app, "user_A", "linux");
   mac.send({ type: "message", message: "top-secret-clipboard-text" });
   assert.equal((await linux.next()).type, "message");
+  const tunnelData = Buffer.from("top-secret-tunnel-bytes");
+  mac.sendFrame({
+    kind: TunnelKind.Open,
+    flags: FLAG_OPENER,
+    tunnelId: 1,
+    deviceId: device("linux"),
+  });
+  mac.sendFrame({
+    kind: TunnelKind.Data,
+    flags: FLAG_OPENER,
+    tunnelId: 1,
+    deviceId: device("linux"),
+    data: tunnelData,
+  });
+  await linux.nextFrame();
+  assert.deepEqual((await linux.nextFrame()).data, tunnelData);
 
   const badToken = accessToken("user_A", { untrustedKey: true });
   await expectRejected(app, badToken);
@@ -349,7 +403,8 @@ test("tokens, secrets, and message contents never reach the logs", async (t) => 
   const log = lines.join("");
   assert.match(log, /relay connection registered/, "logging was captured");
   assert.match(log, /relay authentication failed/);
-  for (const secret of [tokenA, badToken, TEST_SECRET_KEY, "top-secret-clipboard-text"]) {
+  const secrets = [tokenA, badToken, TEST_SECRET_KEY, "top-secret-clipboard-text"];
+  for (const secret of [...secrets, tunnelData.toString("utf8"), tunnelData.toString("base64")]) {
     assert.ok(!log.includes(secret), "a secret was logged");
   }
   // Not even a fragment of a token: signatures are the sensitive part.
@@ -358,4 +413,118 @@ test("tokens, secrets, and message contents never reach the logs", async (t) => 
   }
   mac.socket.terminate();
   linux.socket.terminate();
+});
+
+/** An `open` from the device that opens tunnel `tunnelId`, addressed to `to`. */
+function open(to: string, tunnelId = 1) {
+  return { kind: TunnelKind.Open, flags: FLAG_OPENER, tunnelId, deviceId: device(to) };
+}
+
+function data(to: string, bytes: Buffer, flags = FLAG_OPENER, tunnelId = 1) {
+  return { kind: TunnelKind.Data, flags, tunnelId, deviceId: device(to), data: bytes };
+}
+
+test("tunnel frames reach only the named device of the sender's user, data unchanged", async (t) => {
+  const { app } = await setup(t);
+  const macA = await register(app, "user_A", "mac");
+  const fedoraA = await register(app, "user_A", "fedora");
+  const windowsA = await register(app, "user_A", "windows");
+  const fedoraB = await register(app, "user_B", "fedora");
+
+  macA.sendFrame(open("fedora", 7));
+  // Delivered with the sender's registered device ID in place of the destination.
+  assert.deepEqual(await fedoraA.nextFrame(), { ...open("mac", 7), data: Buffer.alloc(0) });
+
+  // Arbitrary bytes, as ciphertext would be: forwarded byte for byte.
+  const ciphertext = Buffer.from(Array.from({ length: 65536 }, (_, i) => (i * 131 + 7) % 256));
+  macA.sendFrame(data("fedora", ciphertext, FLAG_OPENER, 7));
+  const forwarded = await fedoraA.nextFrame();
+  assert.equal(forwarded.kind, TunnelKind.Data);
+  assert.ok(forwarded.data.equals(ciphertext));
+
+  // And back: the device that didn't open the tunnel sends without the opener flag.
+  fedoraA.sendFrame(data("mac", Buffer.from([1, 2, 3]), 0, 7));
+  assert.deepEqual(await macA.nextFrame(), data("fedora", Buffer.from([1, 2, 3]), 0, 7));
+
+  // Nobody else saw any of it: not the sender, not another device, not another user's device
+  // with the same device ID.
+  macA.send({ type: "message", message: "sync point" });
+  for (const client of [windowsA, fedoraA]) assert.equal((await client.next()).type, "message");
+  assert.equal((await macA.next()).type, "sent");
+  for (const client of [macA, windowsA, fedoraB]) assert.equal(client.queuedFrames, 0);
+
+  for (const client of [macA, fedoraA, windowsA, fedoraB]) client.socket.terminate();
+});
+
+test("a frame another user's device or a disconnected device can't receive is answered with a close", async (t) => {
+  const { app, connections } = await setup(t);
+  const macA = await register(app, "user_A", "mac");
+  const fedoraA = await register(app, "user_A", "fedora");
+  const macB = await register(app, "user_B", "mac");
+
+  // `fedora` exists only for user A. User B's device can't reach it.
+  macB.sendFrame(open("fedora", 3));
+  const refused = { kind: TunnelKind.Close, flags: 0, tunnelId: 3, deviceId: device("fedora") };
+  assert.deepEqual(await macB.nextFrame(), { ...refused, data: Buffer.alloc(0) });
+
+  // A disconnected device is skipped the same way: the close looks like it came from that device,
+  // so the sender finds the tunnel it refers to.
+  fedoraA.socket.terminate();
+  await eventually(() => connections.connectionCount === 2);
+  macA.sendFrame(data("fedora", Buffer.from("ciphertext"), FLAG_OPENER, 9));
+  assert.deepEqual(await macA.nextFrame(), { ...refused, tunnelId: 9, data: Buffer.alloc(0) });
+  // A close to a device that's gone needs no answer.
+  macA.sendFrame({
+    kind: TunnelKind.Close,
+    flags: FLAG_OPENER,
+    tunnelId: 9,
+    deviceId: device("fedora"),
+  });
+
+  // Once it reconnects, it receives new tunnels.
+  const fedoraAgain = await register(app, "user_A", "fedora");
+  macA.sendFrame(open("fedora", 10));
+  assert.deepEqual(await fedoraAgain.nextFrame(), { ...open("mac", 10), data: Buffer.alloc(0) });
+  assert.equal(macA.queuedFrames, 0);
+  assert.equal(macB.queuedFrames, 0);
+
+  for (const client of [macA, macB, fedoraAgain]) client.socket.terminate();
+});
+
+test("malformed tunnel frames are rejected without closing the connection", async (t) => {
+  const { app } = await setup(t);
+  const mac = await register(app, "user_A", "mac");
+  const fedora = await register(app, "user_A", "fedora");
+
+  const valid = encodeTunnelFrame({ ...data("fedora", Buffer.from([1])) });
+  const invalid: [string, Buffer][] = [
+    ["too short", Buffer.from([2, 1, 0, 0])],
+    ["unknown kind", Buffer.from([9, ...valid.subarray(1)])],
+    ["unknown flag", Buffer.from([2, 0x03, ...valid.subarray(2)])],
+    ["empty device ID", Buffer.from([1, 1, 0, 0, 0, 1, 0])],
+    ["device ID longer than the frame", Buffer.from([1, 1, 0, 0, 0, 1, 20, 0x61])],
+    [
+      "invalid device ID",
+      encodeTunnelFrame({ ...open("fedora"), deviceId: device("fe dora"), data: Buffer.alloc(0) }),
+    ],
+    ["data frame without data", encodeTunnelFrame({ ...data("fedora", Buffer.alloc(0)) })],
+    ["open with data", encodeTunnelFrame({ ...open("fedora"), data: Buffer.from([1]) })],
+    ["too much data", encodeTunnelFrame(data("fedora", Buffer.alloc(64 * 1024 + 1)))],
+    ["addressed to itself", encodeTunnelFrame({ ...open("mac"), data: Buffer.alloc(0) })],
+  ];
+  for (const [what, frame] of invalid) {
+    mac.socket.send(frame, { binary: true });
+    assert.deepEqual(
+      await mac.next(),
+      { type: "error", code: "invalid_frame", message: "not a valid tunnel frame" },
+      what,
+    );
+  }
+  assert.equal(fedora.queuedFrames, 0);
+
+  // The connection still works.
+  mac.socket.send(valid, { binary: true });
+  assert.deepEqual((await fedora.nextFrame()).data, Buffer.from([1]));
+  mac.socket.terminate();
+  fedora.socket.terminate();
 });

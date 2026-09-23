@@ -17,8 +17,9 @@ const MODES: { value: ConnectionMode; label: string }[] = [
 ];
 
 /**
- * Connection mode, relay connection status, account, and relay URL, as rows of the Settings card. In relay mode the app connects to the relay, but clipboard items still
- * sync over the local network only, and the UI says so.
+ * Connection mode, relay connection status, account, and relay URL, as rows of the Settings card.
+ * In relay mode, clipboard items also reach paired devices through the relay, end-to-end
+ * encrypted; pairing itself still happens on the local network, and the UI says so.
  */
 export function ConnectionSettings({ onError }: { onError: (error: string | null) => void }) {
   const [mode, setMode] = useState<ConnectionMode | null>(null);
@@ -81,9 +82,9 @@ export function ConnectionSettings({ onError }: { onError: (error: string | null
               }}
               inputProps={{ type: "url", inputMode: "url" }}
             />
-            <p className="text-xs text-amber-700 dark:text-amber-300">
-              Clipboard items don't go through the relay yet. Until they do, Cled keeps syncing them
-              over your local network.
+            <p className="text-xs text-neutral-500">
+              Paired devices signed in to this account sync through the relay, end-to-end encrypted.
+              Pair new devices on the same network first.
             </p>
           </div>
         </div>

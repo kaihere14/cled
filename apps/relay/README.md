@@ -1,8 +1,7 @@
 # Cled Relay
 
-> **Status: early development.** Devices sign in with a Clerk account and the relay routes test
-> messages between the devices of each account. It doesn't carry clipboard data yet: clipboard
-> items still sync only between devices on the same local network.
+> **Status: early development.** Devices sign in with a Clerk account, and the relay carries
+> end-to-end encrypted clipboard sync between the paired devices of each account.
 
 The relay will let Cled devices on different networks reach each other. It's a small,
 self-hostable server that forwards encrypted payloads from one device to another.
@@ -28,9 +27,9 @@ Anyone can run their own relay; nothing about it depends on a hosted service.
 | --- | --- |
 | `GET /health` | Returns `{ "status": "ok" }`. For load balancers and uptime checks. |
 | `GET /auth/config` | Where devices sign in: `{ "issuer", "clientId", "scopes" }`. Public values only. |
-| `GET /relay` (WebSocket) | Devices authenticate with an access token, then exchange test messages with their account's other devices. See [WebSocket protocol](#websocket-protocol). Messages over 16 MiB + 64 KiB close the connection (code 1009). |
+| `GET /relay` (WebSocket) | Devices authenticate with an access token, then open encrypted tunnels to their account's other devices. See [WebSocket protocol](#websocket-protocol). Messages over 64 KiB + 135 bytes close the connection (code 1009). |
 
-Not implemented yet: clipboard payloads, delivery to offline devices, rate limiting, and running
+Not implemented yet: delivery to offline devices, rate limiting, and running
 more than one relay instance. These come in later milestones.
 
 ## Authentication
@@ -95,24 +94,52 @@ Each message is one JSON object in a text frame.
    Every other connected device of the sender's user receives
    `{ "type": "message", "from": { "userId": "...", "deviceId": "..." }, "message": "hello" }`,
    and the sender gets `{ "type": "sent", "recipients": 2 }`. There's no target: a device can only
-   reach its own user's devices. Test messages are at most 4096 characters. They exist only to
-   prove routing and will be replaced by opaque encrypted clipboard payloads.
-4. Closing the connection, cleanly or not, removes only that device. The user's other devices
+   reach its own user's devices. Test messages are at most 4096 characters. They are temporary,
+   for checking a connection, and never carry clipboard content.
+4. Clipboard items go through [tunnels](#tunnels), in binary frames.
+5. Closing the connection, cleanly or not, removes only that device. The user's other devices
    stay connected.
 
 Anything else invalid gets `{ "type": "error", "code": "...", "message": "..." }`:
 
 | Code | Meaning |
 | --- | --- |
-| `invalid_json` | Not valid JSON, or a binary frame. |
+| `invalid_json` | A text frame that isn't valid JSON. |
+| `invalid_frame` | A binary frame that isn't a valid tunnel frame, or is addressed to the sender. |
 | `invalid_message` | Valid JSON, but not a message described above (including a missing token). |
 | `unauthorized` | The access token was rejected. The connection is closed. |
-| `not_registered` | Sent `message` before registering. |
+| `not_registered` | Sent `message` or a tunnel frame before registering. |
 | `already_registered` | Sent `register` twice on one connection. |
 | `no_other_devices` | The sender's user has no other devices connected. |
 | `internal_error` | Something failed in the relay. Details are logged, not sent. |
 
-Never logged: access tokens, secrets, and message contents. Connections are kept in memory only;
+### Tunnels
+
+Two paired devices sync by running their end-to-end encrypted session (the same Noise `KK`
+session they use on a local network, see `crates/cled-lan` and
+[RFC 0001](../../docs/rfcs/0001-lan-sync.md)) over a tunnel: an ordered byte stream between them,
+carried in binary WebSocket frames. Every byte in a tunnel is ciphertext and authenticated end to
+end; the relay has no key, and a changed byte makes the receiving device drop the session.
+
+```text
+offset 0      kind: 1 open, 2 data, 3 close
+offset 1      flags: bit 0 set when the sender of this frame opened the tunnel; others zero
+offset 2      tunnel ID, u32 big-endian, chosen by the device that opened it
+offset 6      device ID length N, 1-128
+offset 7      device ID: the destination when a device sends, the source when the relay delivers
+offset 7 + N  data: data frames only, 1 to 65 536 bytes of ciphertext
+```
+
+The relay looks the destination up among the sender's own user's connected devices, replaces
+the device ID with the sender's registered one, and forwards the frame with its data unchanged.
+If the destination isn't connected (another user's devices never are, as far as a sender can
+tell), the sender gets a `close` for that tunnel instead. The relay keeps no tunnel state.
+
+What the relay sees: the user, both device IDs, tunnel IDs, frame kinds, sizes, and timing. What
+it can't see or change undetected: which items are copied, whether they're text or images, their
+content, device names, and item IDs.
+
+Never logged: access tokens, secrets, and message contents, including tunnel data. Connections are kept in memory only;
 restarting the relay drops them, and devices reconnect.
 
 ## Running it
@@ -163,6 +190,7 @@ TLS (for example Caddy or nginx) so connections use `https://` and `wss://`.
 pnpm --filter cled-relay typecheck
 pnpm --filter cled-relay test        # node:test, no network ports, no real Clerk credentials
 pnpm check                           # from the root: Biome + typecheck for every app
+scripts/relay-e2e.sh                 # from the root: devices syncing end to end through a real relay
 ```
 
 ## Code layout
@@ -176,13 +204,15 @@ src/
     identity.ts            UserId, AuthenticatedIdentity, and the AuthVerifier interface
     clerk.ts               The Clerk-backed AuthVerifier (the only Clerk-aware code)
   testing/clerk.ts         Test-only stand-in Clerk instance (excluded from the build)
+  testing/e2e-relay.ts     A real relay for `scripts/relay-e2e.sh` (excluded from the build)
   features/
     health/routes.ts       GET /health
     auth/routes.ts         GET /auth/config
     relay/
       routes.ts            WebSocket endpoint: authentication, connection lifecycle, routing
       registry.ts          In-memory connections, grouped by user then device
-      protocol.ts          Zod schemas for every message in and out
+      protocol.ts          Zod schemas for every JSON message in and out
+      tunnel.ts            Binary tunnel frames: parsing and encoding the routing header
       identity.ts          Device ID type and the per-connection Identity
 ```
 

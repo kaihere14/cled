@@ -30,7 +30,7 @@ url = "2"
 # Relay WebSocket client.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-tokio = { version = "1", features = ["io-util", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 # TLS for `wss://` relays. tokio-tungstenite picks no crypto provider itself; enabling `ring`
 # here makes it the only one, so rustls selects it automatically.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

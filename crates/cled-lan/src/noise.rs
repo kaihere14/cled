@@ -1,4 +1,5 @@
-//! Encrypted, authenticated channels over TCP using the Noise protocol framework.
+//! Encrypted, authenticated channels over any ordered byte stream (direct TCP or a relay tunnel)
+//! using the Noise protocol framework.
 //!
 //! - Pairing: SPAKE2 turns the pairing code into a shared key, then `Noise_XXpsk3` exchanges
 //!   and authenticates both devices' static keys, bound to that key.
@@ -11,8 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use snow::{HandshakeState, TransportState};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::keys::{KEY_LEN, Keys};
 use crate::wire::MAX_MESSAGE_BYTES;
@@ -34,14 +34,14 @@ fn pairing_params() -> snow::params::NoiseParams {
         .expect("valid Noise params")
 }
 
-async fn write_frame(writer: &mut OwnedWriteHalf, frame: &[u8]) -> Result<()> {
+async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> Result<()> {
     let len = u16::try_from(frame.len()).map_err(|_| LanError::TooLarge(frame.len()))?;
     writer.write_all(&len.to_be_bytes()).await?;
     writer.write_all(frame).await?;
     Ok(())
 }
 
-async fn read_frame(reader: &mut OwnedReadHalf) -> Result<Vec<u8>> {
+async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
     let mut len = [0u8; 2];
     reader.read_exact(&mut len).await?;
     let mut frame = vec![0u8; usize::from(u16::from_be_bytes(len))];
@@ -52,8 +52,8 @@ async fn read_frame(reader: &mut OwnedReadHalf) -> Result<Vec<u8>> {
 /// Drives a Noise handshake to completion. `initiator` writes first.
 async fn handshake(
     mut state: HandshakeState,
-    reader: &mut OwnedReadHalf,
-    writer: &mut OwnedWriteHalf,
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
 ) -> Result<(TransportState, [u8; KEY_LEN])> {
     let mut buf = vec![0u8; MAX_NOISE_MESSAGE];
     while !state.is_handshake_finished() {
@@ -80,8 +80,8 @@ pub(crate) async fn session_handshake(
     keys: &Keys,
     remote_key: &[u8; KEY_LEN],
     prologue: &[u8],
-    reader: &mut OwnedReadHalf,
-    writer: &mut OwnedWriteHalf,
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
 ) -> Result<TransportState> {
     let builder = snow::Builder::new(session_params())
         .local_private_key(&keys.private)?
@@ -101,8 +101,8 @@ pub(crate) async fn pairing_handshake(
     keys: &Keys,
     psk: &[u8; 32],
     prologue: &[u8],
-    reader: &mut OwnedReadHalf,
-    writer: &mut OwnedWriteHalf,
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
 ) -> Result<(TransportState, [u8; KEY_LEN])> {
     let builder = snow::Builder::new(pairing_params())
         .local_private_key(&keys.private)?
@@ -126,7 +126,11 @@ impl Cipher {
         Self(Arc::new(Mutex::new(state)))
     }
 
-    pub(crate) async fn send(&self, writer: &mut OwnedWriteHalf, message: &[u8]) -> Result<()> {
+    pub(crate) async fn send(
+        &self,
+        writer: &mut (impl AsyncWrite + Unpin),
+        message: &[u8],
+    ) -> Result<()> {
         if message.len() > MAX_MESSAGE_BYTES {
             return Err(LanError::TooLarge(message.len()));
         }
@@ -144,7 +148,7 @@ impl Cipher {
         Ok(())
     }
 
-    pub(crate) async fn recv(&self, reader: &mut OwnedReadHalf) -> Result<Vec<u8>> {
+    pub(crate) async fn recv(&self, reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
         let mut plain = vec![0u8; MAX_NOISE_MESSAGE];
         let mut message = Vec::new();
         let mut expected: Option<usize> = None;

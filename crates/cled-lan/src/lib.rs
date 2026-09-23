@@ -17,5 +17,5 @@ mod wire;
 pub use code::PairingCode;
 pub use error::{LanError, Result};
 pub use keys::Keys;
-pub use node::{Config, Event, LanNode, PairableDevice, PeerStatus};
+pub use node::{Config, Event, LanNode, PairableDevice, PeerStatus, Transport};
 pub use wire::{MAX_MESSAGE_BYTES, PROTOCOL_VERSION};

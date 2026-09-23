@@ -1,17 +1,22 @@
 //! Connection to a Cled relay (`apps/relay`), used while the connection mode is "relay".
 //!
-//! This milestone only proves the connection: once signed in (see `auth.rs`), the app registers
-//! with the relay using an access token and its device ID, keeps the connection alive, reconnects
-//! when it drops, and can send test messages to the user's other devices. The relay decides the
-//! user from the verified token; the app never names it. No clipboard data goes through the relay
-//! yet.
+//! Once signed in (see `auth.rs`), the app registers with the relay using an access token and its
+//! device ID, keeps the connection alive, and reconnects when it drops. The relay decides the user
+//! from the verified token; the app never names it.
+//!
+//! Clipboard items reach paired devices through tunnels (`tunnel.rs`): `cled-lan` runs the same
+//! end-to-end encrypted session over a tunnel as over the local network, so items, encryption,
+//! and the `SyncEngine` path are unchanged, and the relay only forwards ciphertext. Test messages
+//! (`send_relay_test`) are a separate, temporary JSON message.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::auth::{AuthState, AuthStatus, TokenError};
+use crate::tunnel::Tunnels;
 use std::time::Duration;
 
+use cled_lan::LanNode;
 use cled_sync::DeviceId;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -35,6 +40,9 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(50);
 const MIN_RETRY: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
+/// How often to open tunnels to paired devices that aren't connected. Devices that aren't on the
+/// relay cost one small frame each, which the relay answers with a close.
+const TUNNEL_INTERVAL: Duration = Duration::from_secs(5);
 /// How long a test message waits for the relay to confirm it.
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// The relay closes a connection with this code when the same device connects again
@@ -145,6 +153,7 @@ impl RelayState {
         device_name: String,
         settings: &Settings,
         auth: Arc<AuthState>,
+        node: Option<Arc<LanNode>>,
     ) -> Self {
         let inputs = Inputs {
             mode: settings.connection_mode,
@@ -167,6 +176,7 @@ impl RelayState {
             auth,
             control: control.clone(),
             device_id: device.to_string(),
+            node,
         };
         tauri::async_runtime::spawn(task.run(desired_rx, outgoing_rx));
         Self {
@@ -267,6 +277,8 @@ struct Task<R: Runtime> {
     auth: Arc<AuthState>,
     control: Control,
     device_id: String,
+    /// Runs sessions over tunnels. `None` if sync couldn't start; the connection still works.
+    node: Option<Arc<LanNode>>,
 }
 
 impl<R: Runtime> Task<R> {
@@ -453,6 +465,10 @@ impl<R: Runtime> Task<R> {
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ping.reset();
         let mut last_seen = Instant::now();
+        // Dropped with this connection, which ends every session running through it.
+        let (mut tunnels, mut pumped) = Tunnels::new();
+        let mut dial = interval(TUNNEL_INTERVAL);
+        dial.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -460,6 +476,14 @@ impl<R: Runtime> Task<R> {
                     last_seen = Instant::now();
                     let text = match frame {
                         Some(Ok(Message::Text(text))) => text,
+                        Some(Ok(Message::Binary(frame))) => {
+                            if let Some(reply) = tunnels.receive(&frame, self.node.as_deref())
+                                && let Err(err) = sink.send(Message::binary(reply)).await
+                            {
+                                return dropped(format!("Lost the connection: {err}"));
+                            }
+                            continue;
+                        }
                         Some(Ok(Message::Close(frame))) => {
                             let code = frame.as_ref().map(|f| f.code);
                             return if code == Some(CloseCode::Library(REPLACED_CLOSE_CODE)) {
@@ -474,7 +498,7 @@ impl<R: Runtime> Task<R> {
                                 dropped("The relay closed the connection.".into())
                             };
                         }
-                        Some(Ok(_)) => continue, // Pong, ping (answered automatically), binary.
+                        Some(Ok(_)) => continue, // Pong, ping (answered automatically).
                         Some(Err(err)) => return dropped(format!("Lost the connection: {err}")),
                         None => return dropped("The relay closed the connection.".into()),
                     };
@@ -512,6 +536,22 @@ impl<R: Runtime> Task<R> {
                         return dropped(format!("Lost the connection: {err}"));
                     }
                     pending.push_back(out.reply);
+                }
+                Some(pumped) = pumped.recv() => {
+                    // Ciphertext from a session, or the end of one.
+                    if let Some(frame) = tunnels.on_pumped(pumped)
+                        && let Err(err) = sink.send(Message::binary(frame)).await
+                    {
+                        return dropped(format!("Lost the connection: {err}"));
+                    }
+                }
+                _ = dial.tick() => {
+                    let Some(node) = &self.node else { continue };
+                    for open in tunnels.dial(node) {
+                        if let Err(err) = sink.send(Message::binary(open)).await {
+                            return dropped(format!("Lost the connection: {err}"));
+                        }
+                    }
                 }
                 _ = ping.tick() => {
                     if last_seen.elapsed() > IDLE_TIMEOUT {

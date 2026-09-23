@@ -4,8 +4,11 @@ mod clipboard;
 mod device;
 mod preview;
 mod relay;
+#[cfg(test)]
+mod relay_e2e;
 mod settings;
 mod sync;
+mod tunnel;
 
 use tauri::{Manager, RunEvent};
 
@@ -37,6 +40,7 @@ pub fn run() {
                 sync::device_name(),
                 &settings.current(),
                 std::sync::Arc::clone(&auth),
+                sync.node().cloned(),
             );
             app.manage(settings);
             app.manage(auth);

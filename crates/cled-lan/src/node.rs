@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 
 use cled_sync::{ClipboardItem, DeviceId};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -40,6 +39,34 @@ const MAX_PAIRING_FAILURES: u32 = 3;
 /// Differences between device clocks above this are reported, because newest-wins compares
 /// clocks.
 const CLOCK_SKEW_WARNING_MS: u64 = 5_000;
+
+/// An ordered, reliable byte stream a session can run over: a TCP connection, or a tunnel through
+/// a relay. Sessions are encrypted and authenticated end to end either way, so the transport
+/// never sees content and can't forge it.
+pub trait Transport: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> Transport for T {}
+
+type Reader = Box<dyn AsyncRead + Send + Unpin>;
+type Writer = Box<dyn AsyncWrite + Send + Unpin>;
+
+fn split(stream: impl Transport) -> (Reader, Writer) {
+    let (reader, writer) = tokio::io::split(stream);
+    (Box::new(reader), Box::new(writer))
+}
+
+fn split_tcp(stream: TcpStream) -> (Reader, Writer) {
+    let (reader, writer) = stream.into_split();
+    (Box::new(reader), Box::new(writer))
+}
+
+/// Where an incoming connection came from.
+#[derive(Debug, Clone, Copy)]
+enum Origin {
+    Tcp(SocketAddr),
+    /// A tunnel the transport says was opened by this device. Only a claim: the session
+    /// handshake proves it.
+    Tunnel(DeviceId),
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -271,6 +298,42 @@ impl LanNode {
         self.block_on(async move { inner.remove_peer(device_id).await })
     }
 
+    /// Whether this device should start a session with paired device `peer` now: it isn't
+    /// connected, and by the same rule as direct connections, this is the side that dials.
+    pub fn should_connect(&self, peer: DeviceId) -> bool {
+        lock(&self.inner.peers).get(peer).is_some()
+            && !self.inner.is_connected(peer)
+            && self.inner.should_dial(peer)
+    }
+
+    /// Starts a session with paired device `peer` over `transport`, such as a relay tunnel,
+    /// as the dialing side. The handshake, encryption, and messages are the same as over direct
+    /// TCP. Returns immediately; failures are logged and the session simply doesn't start.
+    pub fn connect_over(&self, peer: DeviceId, transport: impl Transport) {
+        let inner = Arc::clone(&self.inner);
+        self.runtime().spawn(async move {
+            let Some(peer) = lock(&inner.peers).get(peer).cloned() else {
+                return;
+            };
+            let id = peer.device_id;
+            let (reader, writer) = split(transport);
+            if let Err(err) = inner.connect_over(peer, reader, writer, None).await {
+                log::debug!("session with {id} over a tunnel failed: {err}");
+            }
+        });
+    }
+
+    /// Accepts a session over `transport` that the transport says `from` opened. Like a direct
+    /// connection, it's refused unless `from` completes the handshake with its paired key.
+    pub fn accept_over(&self, from: DeviceId, transport: impl Transport) {
+        let inner = Arc::clone(&self.inner);
+        self.runtime().spawn(async move {
+            if let Err(err) = handle_incoming(inner, transport, Origin::Tunnel(from)).await {
+                log::debug!("tunnel from {from} rejected: {err}");
+            }
+        });
+    }
+
     fn runtime(&self) -> &tokio::runtime::Runtime {
         self.runtime.as_ref().expect("runtime lives until drop")
     }
@@ -471,8 +534,13 @@ impl Inner {
         }
     }
 
-    async fn accept_pairing(self: &Arc<Self>, stream: TcpStream, joiner: DeviceId) -> Result<()> {
-        let peer_addr = stream.peer_addr()?;
+    async fn accept_pairing(
+        self: &Arc<Self>,
+        mut reader: Reader,
+        mut writer: Writer,
+        peer_addr: SocketAddr,
+        joiner: DeviceId,
+    ) -> Result<()> {
         let mut session = self.pairing.lock().await;
         let Some(active) = session.as_mut() else {
             return Err(LanError::NotPairing); // Closing tells the joiner.
@@ -485,7 +553,6 @@ impl Inner {
             return Err(LanError::CodeExpired);
         }
 
-        let (mut reader, mut writer) = stream.into_split();
         let result = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
             self.pairing_exchange(&active.code, joiner, &mut reader, &mut writer),
@@ -533,7 +600,7 @@ impl Inner {
         code: PairingCode,
     ) -> Result<PeerStatus> {
         let (stream, address) = connect_any(&addresses).await?;
-        let (mut reader, mut writer) = stream.into_split();
+        let (mut reader, mut writer) = split_tcp(stream);
         writer
             .write_all(&preamble(KIND_PAIRING, self.config.device_id))
             .await?;
@@ -568,8 +635,8 @@ impl Inner {
         &self,
         code: &PairingCode,
         joiner: DeviceId,
-        reader: &mut OwnedReadHalf,
-        writer: &mut OwnedWriteHalf,
+        reader: &mut Reader,
+        writer: &mut Writer,
     ) -> Result<(Hello, [u8; 32])> {
         let me = self.config.device_id;
         let (spake, outbound) = Spake2::<Ed25519Group>::start_a(
@@ -597,8 +664,8 @@ impl Inner {
         &self,
         code: &PairingCode,
         listener: DeviceId,
-        reader: &mut OwnedReadHalf,
-        writer: &mut OwnedWriteHalf,
+        reader: &mut Reader,
+        writer: &mut Writer,
     ) -> Result<(Hello, [u8; 32])> {
         let me = self.config.device_id;
         let (spake, outbound) = Spake2::<Ed25519Group>::start_b(
@@ -702,8 +769,20 @@ impl Inner {
     /// the background).
     async fn connect(self: Arc<Self>, peer: Peer, addresses: Vec<SocketAddr>) -> Result<()> {
         let (stream, address) = connect_any(&addresses).await?;
+        let (reader, writer) = split_tcp(stream);
+        self.connect_over(peer, reader, writer, Some(address)).await
+    }
+
+    /// Runs the dialing side of a session over an open connection. `address` is where a direct
+    /// connection reached the peer (`None` for a tunnel).
+    async fn connect_over(
+        self: Arc<Self>,
+        peer: Peer,
+        mut reader: Reader,
+        mut writer: Writer,
+        address: Option<SocketAddr>,
+    ) -> Result<()> {
         let me = self.config.device_id;
-        let (mut reader, mut writer) = stream.into_split();
         writer.write_all(&preamble(KIND_SESSION, me)).await?;
 
         let prologue = session_prologue(me, peer.device_id);
@@ -730,13 +809,18 @@ impl Inner {
             &mut writer,
         )
         .await?;
-        let address = with_port(address, hello.listen_port);
+        let address = address.map(|address| with_port(address, hello.listen_port));
         self.start_session(peer.device_id, me, hello, address, cipher, reader, writer);
         Ok(())
     }
 
-    async fn accept_session(self: Arc<Self>, stream: TcpStream, initiator: DeviceId) -> Result<()> {
-        let peer_addr = stream.peer_addr()?;
+    async fn accept_session(
+        self: Arc<Self>,
+        mut reader: Reader,
+        mut writer: Writer,
+        peer_addr: Option<SocketAddr>,
+        initiator: DeviceId,
+    ) -> Result<()> {
         let (peer, was_removed) = {
             let peers = lock(&self.peers);
             match (peers.get(initiator), peers.get_removed(initiator)) {
@@ -745,7 +829,6 @@ impl Inner {
                 (None, None) => return Err(LanError::UnknownPeer),
             }
         };
-        let (mut reader, mut writer) = stream.into_split();
         let prologue = session_prologue(initiator, self.config.device_id);
         let cipher = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
             let state = session_handshake(
@@ -772,7 +855,7 @@ impl Inner {
             lock(&self.peers).forget_removed(initiator)?;
             return Ok(());
         }
-        let address = with_port(peer_addr, hello.listen_port);
+        let address = peer_addr.map(|address| with_port(address, hello.listen_port));
         self.start_session(initiator, initiator, hello, address, cipher, reader, writer);
         Ok(())
     }
@@ -783,10 +866,10 @@ impl Inner {
         peer: DeviceId,
         initiator: DeviceId,
         hello: Hello,
-        address: SocketAddr,
+        address: Option<SocketAddr>,
         cipher: Cipher,
-        reader: OwnedReadHalf,
-        writer: OwnedWriteHalf,
+        reader: Reader,
+        writer: Writer,
     ) {
         let skew_ms = now_ms().abs_diff(hello.time_ms);
         if skew_ms > CLOCK_SKEW_WARNING_MS {
@@ -823,7 +906,7 @@ impl Inner {
         });
     }
 
-    async fn read_loop(&self, peer: DeviceId, cipher: &Cipher, mut reader: OwnedReadHalf) {
+    async fn read_loop(&self, peer: DeviceId, cipher: &Cipher, mut reader: Reader) {
         loop {
             let bytes = match tokio::time::timeout(IDLE_TIMEOUT, cipher.recv(&mut reader)).await {
                 Ok(Ok(bytes)) => bytes,
@@ -861,11 +944,7 @@ impl Inner {
     }
 }
 
-async fn write_loop(
-    cipher: Cipher,
-    mut writer: OwnedWriteHalf,
-    mut rx: mpsc::UnboundedReceiver<Outgoing>,
-) {
+async fn write_loop(cipher: Cipher, mut writer: Writer, mut rx: mpsc::UnboundedReceiver<Outgoing>) {
     let ping = match Message::Ping.encode() {
         Ok(ping) => ping,
         Err(_) => return,
@@ -895,8 +974,8 @@ async fn exchange_hellos(
     cipher: &Cipher,
     mine: &Hello,
     expected_peer: DeviceId,
-    reader: &mut OwnedReadHalf,
-    writer: &mut OwnedWriteHalf,
+    reader: &mut Reader,
+    writer: &mut Writer,
 ) -> Result<Hello> {
     let hello = Message::Hello(mine.clone()).encode()?;
     let (sent, received) = tokio::join!(cipher.send(writer, &hello), cipher.recv(reader));
@@ -952,16 +1031,17 @@ async fn accept_loop(inner: Arc<Inner>, listener: TcpListener) {
         };
         let inner = Arc::clone(&inner);
         tokio::spawn(async move {
-            if let Err(err) = handle_incoming(inner, stream).await {
+            if let Err(err) = handle_incoming(inner, stream, Origin::Tcp(from)).await {
                 log::debug!("incoming connection from {from} rejected: {err}");
             }
         });
     }
 }
 
-async fn handle_incoming(inner: Arc<Inner>, mut stream: TcpStream) -> Result<()> {
+async fn handle_incoming(inner: Arc<Inner>, stream: impl Transport, origin: Origin) -> Result<()> {
+    let (mut reader, writer) = split(stream);
     let mut preamble = [0u8; 22];
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut preamble))
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, reader.read_exact(&mut preamble))
         .await
         .map_err(|_| LanError::Timeout)??;
     if &preamble[..4] != MAGIC || preamble[4] != PREAMBLE_VERSION {
@@ -971,10 +1051,27 @@ async fn handle_incoming(inner: Arc<Inner>, mut stream: TcpStream) -> Result<()>
     if sender == inner.config.device_id {
         return Err(LanError::Malformed("connection from self".into()));
     }
-    match preamble[5] {
-        KIND_SESSION => inner.accept_session(stream, sender).await,
-        KIND_PAIRING => inner.accept_pairing(stream, sender).await,
-        other => Err(LanError::Malformed(format!(
+    match (preamble[5], origin) {
+        // A tunnel's claimed opener must match the preamble; the handshake then proves both.
+        (_, Origin::Tunnel(opener)) if opener != sender => {
+            Err(LanError::Malformed("tunnel opener doesn't match".into()))
+        }
+        (KIND_SESSION, Origin::Tcp(address)) => {
+            inner
+                .accept_session(reader, writer, Some(address), sender)
+                .await
+        }
+        (KIND_SESSION, Origin::Tunnel(_)) => {
+            inner.accept_session(reader, writer, None, sender).await
+        }
+        (KIND_PAIRING, Origin::Tcp(address)) => {
+            inner.accept_pairing(reader, writer, address, sender).await
+        }
+        // Pairing needs both devices on the same network; tunnels only carry sessions.
+        (KIND_PAIRING, Origin::Tunnel(_)) => Err(LanError::Malformed(
+            "pairing isn't possible through a tunnel".into(),
+        )),
+        (other, _) => Err(LanError::Malformed(format!(
             "unknown connection kind {other}"
         ))),
     }

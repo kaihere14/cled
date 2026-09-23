@@ -8,17 +8,23 @@ import {
   parseClientMessage,
   type ServerMessage,
 } from "./protocol.ts";
-import type { ConnectionRegistry } from "./registry.ts";
+import type { Connection, ConnectionRegistry } from "./registry.ts";
+import {
+  encodeTunnelFrame,
+  MAX_TUNNEL_FRAME_BYTES,
+  parseTunnelFrame,
+  TunnelKind,
+  undeliverable,
+} from "./tunnel.ts";
 
 /**
  * Largest WebSocket message the relay accepts. Larger messages close the connection with code
  * 1009 (message too big) before they are buffered.
  *
- * Devices never send a clipboard item over 16 MiB (`MAX_MESSAGE_BYTES` in
- * `crates/cled-lan/src/wire.rs`). The extra 64 KiB leaves room for encryption overhead and the
- * routing envelope, whose format isn't designed yet. Revisit this when it is.
+ * The largest message is a tunnel frame: devices split their encrypted stream (clipboard items
+ * up to 16 MiB) into frames of at most 64 KiB of data. Control messages are far smaller.
  */
-export const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024 + 64 * 1024;
+export const MAX_PAYLOAD_BYTES = MAX_TUNNEL_FRAME_BYTES;
 
 /** Close code sent to a connection whose device registered again on a newer connection. */
 export const REPLACED_CLOSE_CODE = 4001;
@@ -44,11 +50,13 @@ export interface RelayRoutesOptions {
  * the connection added to the registry. A rejected token closes the connection, and so does not
  * registering within `authTimeoutMs`.
  *
- * Once registered, a connection can send test messages, which go to every other connected device
- * of its own user. Closing, cleanly or not, removes exactly that connection.
+ * Once registered, a connection can send binary tunnel frames to another connected device of its
+ * own user (see `tunnel.ts`), and test messages, which go to every other connected device of its
+ * own user. Closing, cleanly or not, removes exactly that connection.
  *
- * Never logged: access tokens and message contents (only sizes, IDs, counts, and failure
- * reasons). Clients never see internal error details or why a token was rejected.
+ * Never logged: access tokens and message contents, including tunnel data (only sizes, IDs,
+ * counts, and failure reasons). Clients never see internal error details or why a token was
+ * rejected.
  */
 export async function relayRoutes(
   app: FastifyInstance,
@@ -106,16 +114,25 @@ interface FrameContext {
 
 async function handleFrame(context: FrameContext, data: Buffer, isBinary: boolean) {
   const { connections, socket, log } = context;
-  const parsed = parseClientMessage(data, isBinary);
+  // The registry, not a local flag, decides whether this socket is registered, so a socket whose
+  // device was replaced by a newer connection stops being treated as that device immediately.
+  const sender = connections.getBySocket(socket);
+
+  if (isBinary) {
+    if (!sender) {
+      send(socket, errorMessage("not_registered", "register before opening tunnels"));
+      return;
+    }
+    forwardTunnelFrame(context, sender, data);
+    return;
+  }
+
+  const parsed = parseClientMessage(data);
   if (!parsed.ok) {
     log.debug({ bytes: data.length, code: parsed.error.code }, "relay message rejected");
     send(socket, parsed.error);
     return;
   }
-
-  // The registry, not a local flag, decides whether this socket is registered, so a socket whose
-  // device was replaced by a newer connection stops being treated as that device immediately.
-  const sender = connections.getBySocket(socket);
   const message = parsed.message;
 
   switch (message.type) {
@@ -154,6 +171,51 @@ async function handleFrame(context: FrameContext, data: Buffer, isBinary: boolea
       );
       return;
     }
+  }
+}
+
+/**
+ * Routes a tunnel frame to the device it names, which must be another connected device of the
+ * sender's own user. The relay swaps the destination for the sender's registered device ID and
+ * copies the data unchanged; it has no key for it. Frames that can't be delivered are answered
+ * with a `close`, so the sender stops waiting on that tunnel.
+ */
+function forwardTunnelFrame(
+  { connections, socket, log }: FrameContext,
+  sender: Connection,
+  data: Buffer,
+) {
+  const frame = parseTunnelFrame(data);
+  if (!frame || frame.deviceId === sender.deviceId) {
+    log.debug({ bytes: data.length }, "relay tunnel frame rejected");
+    send(socket, errorMessage("invalid_frame", "not a valid tunnel frame"));
+    return;
+  }
+  // Looked up within the sender's user only: another user's devices are unreachable by
+  // construction, and indistinguishable from offline ones.
+  const recipient = connections.getConnection(sender.userId, frame.deviceId);
+  if (!recipient) {
+    if (frame.kind !== TunnelKind.Close) {
+      sendBinary(socket, encodeTunnelFrame(undeliverable(frame)));
+    }
+    log.debug(
+      { userId: sender.userId, from: sender.deviceId, to: frame.deviceId, tunnel: frame.tunnelId },
+      "relay tunnel frame undeliverable: device not connected",
+    );
+    return;
+  }
+  sendBinary(recipient.socket, encodeTunnelFrame({ ...frame, deviceId: sender.deviceId }));
+  if (frame.kind !== TunnelKind.Data) {
+    log.debug(
+      {
+        userId: sender.userId,
+        from: sender.deviceId,
+        to: frame.deviceId,
+        tunnel: frame.tunnelId,
+        kind: frame.kind === TunnelKind.Open ? "open" : "close",
+      },
+      "relay tunnel frame forwarded",
+    );
   }
 }
 
@@ -196,5 +258,11 @@ async function register(
 function send(socket: WebSocket, message: ServerMessage): void {
   if (socket.readyState === socket.OPEN) {
     socket.send(JSON.stringify(message));
+  }
+}
+
+function sendBinary(socket: WebSocket, frame: Buffer): void {
+  if (socket.readyState === socket.OPEN) {
+    socket.send(frame, { binary: true });
   }
 }

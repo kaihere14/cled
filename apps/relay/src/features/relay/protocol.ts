@@ -3,9 +3,9 @@ import { userIdSchema } from "../../auth/identity.ts";
 import { deviceIdSchema } from "./identity.ts";
 
 /*
- * The WebSocket protocol, one JSON object per text frame. Deliberately minimal: it only proves
- * that authenticated connections can be routed to. It is not the clipboard protocol, which will
- * carry opaque encrypted payloads the relay forwards without reading.
+ * The WebSocket protocol's control messages, one JSON object per text frame: registration, and
+ * the temporary test message. Clipboard items travel in binary tunnel frames instead (see
+ * `tunnel.ts`), end-to-end encrypted, which the relay routes without reading.
  *
  * Zod checks the shape of messages here. Whether an access token is genuine is the
  * `AuthVerifier`'s job, not this file's.
@@ -46,8 +46,10 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 
 export const errorCodeSchema = z.enum([
-  /** The frame wasn't valid JSON, or was binary. */
+  /** A text frame wasn't valid JSON. */
   "invalid_json",
+  /** A binary frame wasn't a valid tunnel frame, or was addressed to the sending device. */
+  "invalid_frame",
   /** Valid JSON, but not a message this relay understands. */
   "invalid_message",
   /**
@@ -55,7 +57,7 @@ export const errorCodeSchema = z.enum([
    * with the same message, whatever the reason; the connection is then closed.
    */
   "unauthorized",
-  /** Only `register` is accepted before registration succeeds. */
+  /** Only `register` is accepted before registration succeeds; no tunnel frames either. */
   "not_registered",
   /** A connection registers once. */
   "already_registered",
@@ -94,16 +96,12 @@ export function errorMessage(code: ErrorCode, message: string): ErrorMessage {
 }
 
 /**
- * Parses one incoming frame. Failures come back as the error to send, with a fixed description:
- * nothing from the client's input is echoed back.
+ * Parses one incoming text frame. Failures come back as the error to send, with a fixed
+ * description: nothing from the client's input is echoed back.
  */
 export function parseClientMessage(
   data: Buffer,
-  isBinary: boolean,
 ): { ok: true; message: ClientMessage } | { ok: false; error: ErrorMessage } {
-  if (isBinary) {
-    return { ok: false, error: errorMessage("invalid_json", "expected a JSON text frame") };
-  }
   let json: unknown;
   try {
     json = JSON.parse(data.toString("utf8"));

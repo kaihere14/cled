@@ -90,16 +90,23 @@ impl PeerStore {
         self.save()
     }
 
-    /// Updates name and address from a live connection. Saves only if something changed.
-    pub(crate) fn seen(&mut self, id: DeviceId, name: &str, address: SocketAddr) -> Result<()> {
+    /// Updates name and address from a live connection. Saves only if something changed. A
+    /// connection without an address (a relay tunnel) keeps the last direct address.
+    pub(crate) fn seen(
+        &mut self,
+        id: DeviceId,
+        name: &str,
+        address: Option<SocketAddr>,
+    ) -> Result<()> {
         let Some(peer) = self.peers.iter_mut().find(|p| p.device_id == id) else {
             return Ok(());
         };
-        if peer.name == name && peer.last_address == Some(address) {
+        let address = address.or(peer.last_address);
+        if peer.name == name && peer.last_address == address {
             return Ok(());
         }
         peer.name = name.to_owned();
-        peer.last_address = Some(address);
+        peer.last_address = address;
         self.save()
     }
 
