@@ -66,7 +66,8 @@ cargo run -p cled-clipboard --example clip -- write "hello" --hold 5
 cargo run -p cled-clipboard --example clip -- write-image picture.png --hold 5
 ```
 
-See [docs/architecture.md](docs/architecture.md) for how the pieces fit together.
+See [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and
+[docs/building.md](docs/building.md) for building and installing on Windows, macOS, and Linux.
 
 Note: Rust builds of the desktop app expect the frontend to have been built once
 (`pnpm --filter cled-desktop build`), because Tauri embeds `apps/desktop/dist` at compile time.
