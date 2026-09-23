@@ -9,10 +9,11 @@ encryption, and the server will be added when those exist.
 OS clipboard
      │
 crates/cled-clipboard      Rust library, no Tauri dependency
-  platform/                the only place with OS-specific code
-                           (arboard backend + per-OS privacy hints and change tokens)
+  platform/                the only place with OS-specific code: arboard backend, plus per-OS
+                           privacy hints, change tokens, and change notifications
   Clipboard                direct synchronous read/write, returns a Snapshot
-  ClipboardService         background thread: owns the clipboard, polls for changes
+  ClipboardService         background thread: owns the clipboard, reacts to change
+                           notifications (or polls), reports changes
      │
 apps/desktop/src-tauri     Tauri glue only: commands, events, payload types
      │   commands: clipboard_status, read_clipboard, write_clipboard
@@ -44,7 +45,8 @@ apps/desktop/src           React UI: renders state, calls commands, listens to e
 | `ClipboardService` | Spawns one thread that owns a `Clipboard`, serves read/write requests over a channel, and polls for changes. `Send + Sync`; stops on drop. |
 | `ChangeDetector` (internal) | Pure logic deciding whether an observation is a new change. Unit tested without a clipboard. |
 | `platform::Backend` (internal) | Reads/writes via `arboard` on every platform. |
-| `platform::Native` (internal) | Per-OS extras arboard doesn't expose: privacy hints and change tokens. |
+| `platform::Native` (internal) | Per-OS extras arboard doesn't expose: privacy hints, change tokens, change notifications, backend identity. |
+| `BackendInfo` | Which clipboard system is in use (`ClipboardBackend`) and how changes are detected (`ChangeDetection`). |
 
 ### Why a single owning thread
 
@@ -89,36 +91,54 @@ the first one in a row is reported.
 
 ### Change detection
 
-The service polls every 500 ms (`DEFAULT_POLL_INTERVAL`).
+Where the OS offers change notifications, a small watcher thread per platform does nothing but
+signal "the clipboard may have changed" to the clipboard thread:
 
-1. It asks the platform for a **change token**, a cheap value that changes whenever the clipboard
-   changes. If the token is unchanged, the poll ends there.
-2. Otherwise it reads a `Snapshot` and compares its fingerprint with the previous one.
+| Platform | Notifications | Backend reported |
+| --- | --- | --- |
+| Windows | `AddClipboardFormatListener` (`WM_CLIPBOARDUPDATE`), via `clipboard-win`'s `Monitor` | `Windows` |
+| X11 | XFixes `SelectionNotify` for `CLIPBOARD` | `X11` |
+| Wayland with data-control | `selection` events from `ext-data-control-v1` (preferred) or `wlr-data-control-unstable-v1` | `Wayland` |
+| Wayland without data-control (GNOME) | X11 XFixes through XWayland | `XWayland`, flagged as limited |
+| macOS | None exist | `MacOs`, polling |
+
+When a signal arrives, the clipboard thread waits 25 ms, so a burst of signals collapses into one
+check, and then checks the clipboard. With notifications, a **safety check** still runs every
+5 s in case one is ever missed. Without them, the thread polls every 500 ms
+(`DEFAULT_POLL_INTERVAL`).
+
+A check has two steps:
+
+1. Ask the platform for a **change token**, a cheap value that changes whenever the clipboard
+   changes. If the token is unchanged, stop.
+2. Otherwise read a `Snapshot` and compare its fingerprint with the previous one.
 
 | Platform | Change token |
 | --- | --- |
 | Windows | `GetClipboardSequenceNumber` |
 | macOS | `NSPasteboard.changeCount` |
 | Wayland | Hash of the offered formats plus the raw bytes of one representation (plain text if offered, else e.g. `image/png`). Never reads content marked private. |
-| X11 | None yet. Every poll does a full read. XFixes events are planned for M3. |
-
-With a 2560×1440 screenshot on the clipboard on Wayland, the token cut polling cost from about
-7.3% to about 0.1% of one CPU core (release build).
+| X11 | None. Notifications make it unnecessary except for the 5 s safety check. |
 
 The content present at startup is not reported. Copying identical content again is not reported
 either, unless something else was copied in between.
 
-The fingerprint uses `DefaultHasher`, which is only stable within one process. It must never
-be persisted or sent to another device; sync will use a proper content hash.
+The watcher and the clipboard thread use separate connections to the display server. That keeps
+the watcher's blocking event loop independent of reads and writes.
 
-Polling is the M1 approach. Native notifications (Windows clipboard listener, X11 XFixes,
-Wayland data-control events) are planned for M3 and will live in `platform/`.
+#### Measurements (Hyprland, release build, 2560×1440 screenshot on the clipboard)
+
+| | Polling (M2) | Notifications (M3) |
+| --- | --- | --- |
+| Copy-to-detection latency | 0–500 ms | ~27 ms (including the 25 ms debounce) |
+| Cled CPU while idle | ~0.1% of a core | not measurable (0 ticks in 20 s) |
+| Work the source app does for Cled while idle | Re-sends the full PNG twice a second (~6 MB/s) | Once per safety check (every 5 s) |
 
 ## Desktop app (Tauri)
 
 | Interface | Direction | Shape |
 | --- | --- | --- |
-| `clipboard_status` | UI → Rust | `{ state: "watching" }` or `{ state: "unavailable", reason }` |
+| `clipboard_status` | UI → Rust | `{ state: "watching", backend, changeDetection, limited }` or `{ state: "unavailable", reason }` |
 | `read_clipboard` | UI → Rust | `ClipboardPayload \| null` |
 | `write_clipboard(text)` | UI → Rust | `void` or error string |
 | `clipboard:changed` | Rust → UI | `ClipboardPayload` |
@@ -139,7 +159,9 @@ History shown in the UI is in memory only and disappears when the app closes.
 
 ## Known limitations
 
-- Polling, not native change events. X11 has no cheap change token yet.
+- macOS has no change notifications and polls every 500 ms (cheap thanks to `changeCount`).
+- GNOME (Wayland without data-control) runs in limited mode through XWayland. See the
+  [GNOME spike](spikes/gnome.md).
 - Images in history can't be copied again from the UI. Only thumbnails are kept, and full-size
   history storage comes later.
 - Content written by Cled disappears from the clipboard when Cled exits on Linux.

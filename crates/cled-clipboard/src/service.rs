@@ -1,16 +1,27 @@
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::detector::ChangeDetector;
-use crate::{Clipboard, ClipboardContent, ClipboardError, Result, Snapshot};
+use crate::{
+    BackendInfo, ChangeDetection, Clipboard, ClipboardContent, ClipboardError, Result, Snapshot,
+};
 
-/// How often the service checks the clipboard for changes by default.
+/// How often the service checks the clipboard when the OS offers no change notifications.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// With change notifications, a slow background check still runs in case one is ever missed.
+const SAFETY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Delay between a change notification and the check it triggers. Collapses bursts (an app
+/// announcing several formats) into one read, and gives the new owner a moment to settle.
+const NOTIFY_DEBOUNCE: Duration = Duration::from_millis(25);
 
 enum Request {
     Read(Sender<Result<Snapshot>>),
     Write(ClipboardContent, Sender<Result<()>>),
+    /// Sent by the platform watcher when the clipboard may have changed.
+    Changed,
     Stop,
 }
 
@@ -20,15 +31,18 @@ enum Request {
 /// while the writing process's clipboard handle is alive, and some tie clipboard access to one
 /// thread. All reads and writes go through this thread, so `ClipboardService` is `Send + Sync`.
 ///
-/// Changes are detected by polling. Where the platform offers a cheap change indicator, a poll
-/// costs almost nothing unless the clipboard actually changed. The service stops when dropped.
+/// Changes are detected through OS notifications where available (Windows, X11, Wayland with
+/// data-control), otherwise by polling. The service stops when dropped.
 pub struct ClipboardService {
     requests: Sender<Request>,
+    backend: BackendInfo,
     thread: Option<JoinHandle<()>>,
 }
 
 impl ClipboardService {
     /// Starts the clipboard thread.
+    ///
+    /// `poll_interval` applies only when the platform has no change notifications.
     ///
     /// `on_change` runs on the clipboard thread whenever the clipboard changes, including changes
     /// made through [`ClipboardService::write`]. It never receives [`Snapshot::Empty`] and is not
@@ -39,36 +53,57 @@ impl ClipboardService {
     {
         let (requests, receiver) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let notifier = requests.clone();
 
         let thread = thread::Builder::new()
             .name("cled-clipboard".into())
             .spawn(move || {
                 // The clipboard must be created on the thread that uses it.
                 let clipboard = match Clipboard::new() {
-                    Ok(clipboard) => {
-                        let _ = ready_tx.send(Ok(()));
-                        clipboard
-                    }
+                    Ok(clipboard) => clipboard,
                     Err(err) => {
                         let _ = ready_tx.send(Err(err));
                         return;
                     }
                 };
-                run(clipboard, &receiver, poll_interval, on_change);
+                let watcher =
+                    clipboard.watch(Box::new(move || notifier.send(Request::Changed).is_ok()));
+                let backend = BackendInfo {
+                    backend: clipboard.backend(),
+                    change_detection: if watcher.is_some() {
+                        ChangeDetection::Events
+                    } else {
+                        ChangeDetection::Polling
+                    },
+                };
+                let _ = ready_tx.send(Ok(backend));
+
+                let interval = match backend.change_detection {
+                    ChangeDetection::Events => SAFETY_CHECK_INTERVAL,
+                    ChangeDetection::Polling => poll_interval,
+                };
+                run(clipboard, &receiver, interval, on_change);
+                drop(watcher);
             })
             .map_err(|err| ClipboardError::Other(format!("failed to spawn thread: {err}")))?;
 
-        ready_rx
+        let backend = ready_rx
             .recv()
             .map_err(|_| ClipboardError::ServiceStopped)??;
 
         Ok(Self {
             requests,
+            backend,
             thread: Some(thread),
         })
     }
 
-    /// Reads the current clipboard content. See [`Clipboard::read`].
+    /// Which clipboard system is in use and how changes are detected.
+    pub fn backend(&self) -> BackendInfo {
+        self.backend
+    }
+
+    /// Reads the current clipboard. See [`Clipboard::read`].
     pub fn read(&self) -> Result<Snapshot> {
         let (reply, response) = mpsc::channel();
         self.send(Request::Read(reply))?;
@@ -104,8 +139,8 @@ impl Drop for ClipboardService {
 
 fn run<F>(
     mut clipboard: Clipboard,
-    requests: &mpsc::Receiver<Request>,
-    poll_interval: Duration,
+    requests: &Receiver<Request>,
+    interval: Duration,
     mut on_change: F,
 ) where
     F: FnMut(Snapshot),
@@ -115,10 +150,12 @@ fn run<F>(
     detector.baseline(&clipboard.read().unwrap_or(Snapshot::Empty));
 
     let mut last_error: Option<String> = None;
-    let mut next_poll = Instant::now() + poll_interval;
+    let mut schedule = Schedule::new(Instant::now(), interval);
 
     loop {
-        let timeout = next_poll.saturating_duration_since(Instant::now());
+        let timeout = schedule
+            .next_check()
+            .saturating_duration_since(Instant::now());
         match requests.recv_timeout(timeout) {
             Ok(Request::Read(reply)) => {
                 let _ = reply.send(clipboard.read());
@@ -126,9 +163,10 @@ fn run<F>(
             Ok(Request::Write(content, reply)) => {
                 let _ = reply.send(clipboard.write(&content));
             }
+            Ok(Request::Changed) => schedule.notified(Instant::now()),
             Ok(Request::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
-                next_poll = Instant::now() + poll_interval;
+                schedule.checked(Instant::now());
 
                 // Skip the full read when the platform can cheaply tell nothing changed.
                 let token = clipboard.change_token();
@@ -146,7 +184,7 @@ fn run<F>(
                     }
                     Err(ClipboardError::Busy) => {}
                     Err(err) => {
-                        // Log each distinct error once instead of every poll.
+                        // Log each distinct error once instead of every check.
                         let message = err.to_string();
                         if last_error.as_ref() != Some(&message) {
                             log::warn!("clipboard read failed: {message}");
@@ -156,5 +194,79 @@ fn run<F>(
                 }
             }
         }
+    }
+}
+
+/// When the next clipboard check is due: `interval` after the last check, or shortly after a
+/// change notification, whichever comes first.
+#[derive(Debug)]
+struct Schedule {
+    interval: Duration,
+    next: Instant,
+}
+
+impl Schedule {
+    fn new(now: Instant, interval: Duration) -> Self {
+        Self {
+            interval,
+            next: now + interval,
+        }
+    }
+
+    fn next_check(&self) -> Instant {
+        self.next
+    }
+
+    /// A notification arrived. Further notifications before the check don't push it back.
+    fn notified(&mut self, now: Instant) {
+        self.next = self.next.min(now + NOTIFY_DEBOUNCE);
+    }
+
+    fn checked(&mut self, now: Instant) {
+        self.next = now + self.interval;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn checks_at_the_interval_without_notifications() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start, SAFETY_CHECK_INTERVAL);
+        assert_eq!(schedule.next_check(), start + SAFETY_CHECK_INTERVAL);
+
+        let later = start + SAFETY_CHECK_INTERVAL;
+        schedule.checked(later);
+        assert_eq!(schedule.next_check(), later + SAFETY_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn notification_brings_the_check_forward() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start, SAFETY_CHECK_INTERVAL);
+        schedule.notified(start + 100 * MS);
+        assert_eq!(schedule.next_check(), start + 100 * MS + NOTIFY_DEBOUNCE);
+    }
+
+    #[test]
+    fn burst_of_notifications_collapses_into_one_check() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start, SAFETY_CHECK_INTERVAL);
+        schedule.notified(start);
+        schedule.notified(start + 5 * MS);
+        schedule.notified(start + 10 * MS);
+        assert_eq!(schedule.next_check(), start + NOTIFY_DEBOUNCE);
+    }
+
+    #[test]
+    fn notification_never_delays_an_earlier_check() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start, 10 * MS);
+        schedule.notified(start + 5 * MS);
+        assert_eq!(schedule.next_check(), start + 10 * MS);
     }
 }

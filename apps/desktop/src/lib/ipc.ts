@@ -13,7 +13,17 @@ export type SkippedReason =
   | { type: "sensitive" }
   | { type: "tooLarge"; width: number; height: number };
 
-export type ClipboardStatus = { state: "watching" } | { state: "unavailable"; reason: string };
+export type ClipboardStatus =
+  | {
+      state: "watching";
+      backend: ClipboardBackend;
+      changeDetection: "events" | "polling";
+      /** Cled can only partially observe the clipboard (e.g. GNOME without data-control). */
+      limited: boolean;
+    }
+  | { state: "unavailable"; reason: string };
+
+export type ClipboardBackend = "windows" | "macOs" | "wayland" | "x11" | "xWayland" | "unknown";
 
 export function clipboardStatus(): Promise<ClipboardStatus> {
   return invoke("clipboard_status");

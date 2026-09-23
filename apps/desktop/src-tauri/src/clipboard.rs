@@ -2,7 +2,8 @@
 //! Keep clipboard logic in `cled-clipboard`; this module only translates.
 
 use cled_clipboard::{
-    ClipboardContent, ClipboardService, DEFAULT_POLL_INTERVAL, SkipReason, Snapshot,
+    ChangeDetection, ClipboardBackend, ClipboardContent, ClipboardService, DEFAULT_POLL_INTERVAL,
+    SkipReason, Snapshot,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -87,8 +88,55 @@ impl ClipboardState {
 #[derive(Debug, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum ClipboardStatus {
-    Watching,
-    Unavailable { reason: String },
+    #[serde(rename_all = "camelCase")]
+    Watching {
+        backend: Backend,
+        change_detection: Detection,
+        /// Cled can only partially observe the clipboard (e.g. GNOME without data-control).
+        limited: bool,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Backend {
+    Windows,
+    MacOs,
+    Wayland,
+    X11,
+    XWayland,
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Detection {
+    Events,
+    Polling,
+}
+
+impl ClipboardStatus {
+    fn watching(service: &ClipboardService) -> Self {
+        let info = service.backend();
+        Self::Watching {
+            backend: match info.backend {
+                ClipboardBackend::Windows => Backend::Windows,
+                ClipboardBackend::MacOs => Backend::MacOs,
+                ClipboardBackend::Wayland => Backend::Wayland,
+                ClipboardBackend::X11 => Backend::X11,
+                ClipboardBackend::XWayland => Backend::XWayland,
+                _ => Backend::Unknown,
+            },
+            change_detection: match info.change_detection {
+                ChangeDetection::Events => Detection::Events,
+                ChangeDetection::Polling => Detection::Polling,
+            },
+            limited: info.backend.is_limited(),
+        }
+    }
 }
 
 // Commands are `async` so blocking clipboard calls never run on the UI thread.
@@ -96,7 +144,7 @@ pub enum ClipboardStatus {
 #[tauri::command(async)]
 pub fn clipboard_status(state: State<'_, ClipboardState>) -> ClipboardStatus {
     match state.service() {
-        Ok(_) => ClipboardStatus::Watching,
+        Ok(service) => ClipboardStatus::watching(service),
         Err(reason) => ClipboardStatus::Unavailable { reason },
     }
 }

@@ -35,9 +35,8 @@ terminal alongside `wl-copy` / `wl-paste`.
 
 ## Follow-ups
 
-- M3: report the active backend (data-control, X11, or unsupported) to the UI instead of relying
-  on arboard's silent fallback.
-- M3: repeat this spike on GNOME and KDE.
+- ~~M3: report the active backend to the UI.~~ Done.
+- ~~M3: repeat this spike on GNOME.~~ Partly done, see [GNOME spike](gnome.md). KDE still unverified.
 - M4: decide whether clipboard content should outlive the Cled process.
 
 ## Addendum (M2): images and privacy hints
@@ -49,3 +48,12 @@ terminal alongside `wl-copy` / `wl-paste`.
 | 5000×5000 image | Reported as too large. |
 | Writing an image | Other apps see `image/png` with the correct size. |
 | Polling cost with the screenshot on the clipboard | ~7.3% of a core (release) with full reads every poll; **~0.1%** after adding the Wayland change token. |
+
+## Addendum (M3): change notifications
+
+| Check | Result |
+| --- | --- |
+| Backend and detection reported | `Wayland`, `Events` (data-control `selection` events) |
+| Copy-to-detection latency (5 copies) | 26–28 ms, of which 25 ms is Cled's deliberate debounce |
+| Idle CPU with a 2560×1440 screenshot on the clipboard, 20 s | 0 ticks (was ~0.1% of a core with M2 polling) |
+| Forced X11 path (`WAYLAND_DISPLAY` unset) | Backend `XWayland`, `Events`; X11 copies detected via XFixes |

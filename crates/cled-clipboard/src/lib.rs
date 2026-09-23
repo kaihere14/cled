@@ -7,6 +7,7 @@
 //! The backend (currently [`arboard`](https://docs.rs/arboard)) is an implementation detail
 //! hidden in the `platform` module; nothing from it appears in the public API.
 
+mod backend;
 mod content;
 mod detector;
 mod error;
@@ -14,6 +15,7 @@ mod platform;
 mod service;
 mod snapshot;
 
+pub use backend::{BackendInfo, ChangeDetection, ClipboardBackend};
 pub use content::{ClipboardContent, Image};
 pub use error::{ClipboardError, Result};
 pub use service::{ClipboardService, DEFAULT_POLL_INTERVAL};
@@ -70,6 +72,16 @@ impl Clipboard {
     /// can't provide one. Only meaningful for comparing consecutive calls.
     pub(crate) fn change_token(&mut self) -> Option<u64> {
         self.native.change_token()
+    }
+
+    /// Which clipboard system this instance talks to.
+    pub fn backend(&self) -> ClipboardBackend {
+        self.native.backend()
+    }
+
+    /// Starts OS change notifications, if the platform has them.
+    pub(crate) fn watch(&self, notify: platform::Notify) -> Option<platform::Watcher> {
+        self.native.watch(notify)
     }
 
     /// Replaces the clipboard content.

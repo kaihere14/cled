@@ -1,5 +1,6 @@
 import { CurrentClipboard } from "./components/CurrentClipboard";
 import { History } from "./components/History";
+import { LimitedNotice } from "./components/LimitedNotice";
 import { StatusBadge } from "./components/StatusBadge";
 import { WriteForm } from "./components/WriteForm";
 import { useClipboard } from "./lib/useClipboard";
@@ -13,6 +14,8 @@ export function App() {
         <h1 className="text-lg font-semibold tracking-tight">Cled</h1>
         <StatusBadge status={status} />
       </header>
+
+      <LimitedNotice status={status} />
 
       <CurrentClipboard content={current} />
       <WriteForm onWrite={write} disabled={status?.state !== "watching"} />

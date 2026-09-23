@@ -11,10 +11,10 @@ arboard = { version = "3.6", default-features = false, features = ["image-data",
 log = "0.4"
 thiserror = "2"
 
-# Platform crates below are already pulled in by arboard; they're declared directly only to read
-# the clipboard's list of formats (for "don't record this" hints), which arboard doesn't expose.
+# Platform crates below are already pulled in by arboard; they're declared directly for what
+# arboard doesn't expose: "don't record this" hints, change tokens, and change notifications.
 [target.'cfg(windows)'.dependencies]
-clipboard-win = { version = "5.3", features = ["std"] }
+clipboard-win = { version = "5.3", features = ["std", "monitor"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -22,8 +22,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSEnumerator"] }
 
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))))'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wl-clipboard-rs = "0.9"
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["xfixes"] }
 
 [dev-dependencies]
 env_logger = "0.11"

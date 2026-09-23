@@ -9,7 +9,7 @@
 //!
 //! Set `RUST_LOG=debug` (or `RUST_LOG=arboard=trace`) to see which backend is used.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cled_clipboard::{
     Clipboard, ClipboardContent, ClipboardService, DEFAULT_POLL_INTERVAL, Image, SkipReason,
@@ -74,11 +74,22 @@ fn write_and_hold(
 
 fn watch() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
-    let _service = ClipboardService::spawn(DEFAULT_POLL_INTERVAL, move |snapshot| {
+    let service = ClipboardService::spawn(DEFAULT_POLL_INTERVAL, move |snapshot| {
         let elapsed = started.elapsed().as_secs_f32();
-        println!("[{elapsed:>8.2}s] changed: {}", describe(&snapshot));
+        // Wall-clock milliseconds make it easy to measure copy-to-detection latency externally.
+        let epoch_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        println!(
+            "[{elapsed:>8.2}s] (t={epoch_ms}) changed: {}",
+            describe(&snapshot)
+        );
     })?;
-    println!("watching clipboard every {DEFAULT_POLL_INTERVAL:?}; Ctrl+C to stop");
+    let info = service.backend();
+    println!(
+        "backend: {:?}, change detection: {:?}; Ctrl+C to stop",
+        info.backend, info.change_detection
+    );
     loop {
         std::thread::park();
     }

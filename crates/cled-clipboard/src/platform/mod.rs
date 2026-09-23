@@ -7,6 +7,9 @@
 //! - `change_token()`: a cheap value that changes whenever the clipboard changes, so polling can
 //!   skip full reads (and image decoding) when nothing happened. `None` means "can't tell
 //!   cheaply; do a full read".
+//! - `watch()`: OS change notifications, delivered by calling a `Notify` from a background
+//!   thread. `None` means the platform has none (macOS) or setup failed; callers then poll.
+//! - `backend()`: which clipboard system is in use, for display.
 
 mod arboard;
 
@@ -14,7 +17,7 @@ mod arboard;
     unix,
     not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
 ))]
-#[path = "linux.rs"]
+#[path = "linux/mod.rs"]
 mod os;
 #[cfg(target_os = "macos")]
 #[path = "macos.rs"]
@@ -25,6 +28,24 @@ mod os;
 
 pub(crate) use self::arboard::Backend;
 pub(crate) use self::os::Native;
+
+/// Called from a watcher thread when the clipboard may have changed. Returns `false` once the
+/// receiver is gone, telling the watcher to stop.
+pub(crate) type Notify = Box<dyn Fn() -> bool + Send + 'static>;
+
+/// A running change-notification watcher. Dropping it stops its thread.
+pub(crate) struct Watcher {
+    _inner: Box<dyn Send>,
+}
+
+impl Watcher {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn new(inner: impl Send + 'static) -> Self {
+        Self {
+            _inner: Box::new(inner),
+        }
+    }
+}
 
 /// Format names that mark clipboard content as secret or not to be recorded.
 ///

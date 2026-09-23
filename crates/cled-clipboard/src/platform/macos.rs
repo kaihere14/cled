@@ -4,8 +4,8 @@
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::NSPasteboard;
 
-use super::has_private_marker;
-use crate::Result;
+use super::{Notify, Watcher, has_private_marker};
+use crate::{ClipboardBackend, Result};
 
 pub(crate) struct Native;
 
@@ -30,5 +30,14 @@ impl Native {
         Some(autoreleasepool(|_| {
             NSPasteboard::generalPasteboard().changeCount() as u64
         }))
+    }
+
+    pub(crate) fn backend(&self) -> ClipboardBackend {
+        ClipboardBackend::MacOs
+    }
+
+    /// macOS has no clipboard change notification API; the service polls `change_token`.
+    pub(crate) fn watch(&self, _notify: Notify) -> Option<Watcher> {
+        None
     }
 }
