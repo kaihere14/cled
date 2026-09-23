@@ -1,23 +1,33 @@
 # Building installers
 
-The **Build** workflow (`.github/workflows/build.yml`) produces installers for all three
-platforms on GitHub's runners.
+The **Build** workflow (`.github/workflows/build.yml`) builds installers for all three platforms
+on GitHub's runners and publishes them as a **GitHub Release**.
 
 ## Running it
 
-- **Manually:** GitHub → Actions → Build → Run workflow.
-- **Automatically:** push a tag starting with `v`, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
+- **Manually:** GitHub → Actions → Build → Run workflow. This publishes a pre-release tagged
+  `v<version>-build.<run number>`, e.g. `v0.1.0-build.3`.
+- **For a version:** push a tag starting with `v`, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
 
-When the run finishes, download the installers from the **Artifacts** section at the bottom of
-the run page:
+How it runs:
 
-| Artifact | Contents |
+1. A draft release is created.
+2. The three platforms build in parallel, each uploading its installers into the draft.
+3. The release is published only if all three builds succeeded. If one fails, the draft stays
+   unpublished, and you can delete it on the Releases page.
+
+## Downloading
+
+Open the repository's **Releases** page (or the release link on the right of the repository
+home page), pick the newest release, and download from **Assets**:
+
+| System | File |
 | --- | --- |
-| `cled-Windows` | `.msi` and `-setup.exe` installers |
-| `cled-macOS` | `.dmg` (universal: Apple Silicon and Intel) |
-| `cled-Linux` | `.deb` (Debian/Ubuntu), `.rpm` (Fedora/openSUSE), `.AppImage` (any distro) |
-
-Artifacts are zipped by GitHub and kept for 90 days.
+| Windows | `.msi`, or `-setup.exe` |
+| macOS (Apple Silicon and Intel) | `.dmg` |
+| Ubuntu / Debian | `.deb` |
+| Fedora / openSUSE | `.rpm` |
+| Any Linux | `.AppImage` |
 
 ## Installing unsigned builds
 
