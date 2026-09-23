@@ -1,5 +1,6 @@
 //! Running in the background: tray icon, close-to-tray, single instance, start on login.
 
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Manager, Runtime, Window, WindowEvent};
@@ -43,7 +44,8 @@ fn create_tray(app: &App) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit Cled", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
-    let mut tray = TrayIconBuilder::with_id("main")
+    let tray = TrayIconBuilder::with_id("main")
+        .icon(tray_icon())
         .tooltip("Cled")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -51,11 +53,20 @@ fn create_tray(app: &App) -> tauri::Result<()> {
             "quit" => app.exit(0),
             _ => {}
         });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
     tray.build(app)?;
     Ok(())
+}
+
+/// The tray uses the mascot without its background; the app icon keeps the full square artwork.
+fn tray_icon() -> Image<'static> {
+    let rgba = image::load_from_memory_with_format(
+        include_bytes!("../icons/tray.png"),
+        image::ImageFormat::Png,
+    )
+    .expect("bundled tray icon is a valid PNG")
+    .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Image::new_owned(rgba.into_raw(), width, height)
 }
 
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
