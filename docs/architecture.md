@@ -1,7 +1,6 @@
 # Architecture
 
-This document describes how Cled is built today. It grows with the code; a section for the relay
-server will be added when it exists.
+This document describes how Cled is built today. It grows with the code.
 
 ## Overview
 
@@ -298,6 +297,17 @@ plugin's JavaScript API, so the UI needs no extra permissions.
 Without a tray host, a hidden window can still be brought back by launching Cled again.
 
 History shown in the UI is in memory only and disappears when the app closes.
+
+## Relay server (early development)
+
+`apps/relay` is a standalone Node.js + TypeScript server (Fastify, WebSocket) that will route
+encrypted payloads between devices on different networks. It runs on a server, is not bundled
+with the desktop app, and shares no code with the Rust workspace. The desktop app doesn't connect
+to it yet.
+
+Devices encrypt before sending and decrypt after receiving; the relay only forwards opaque bytes
+and never has the keys. Today it has a health endpoint and a WebSocket endpoint that accepts
+connections and drops messages. See [apps/relay/README.md](../apps/relay/README.md).
 
 ## Known limitations
 

@@ -24,6 +24,7 @@ apps/desktop/          Tauri desktop app
 crates/cled-clipboard/ Clipboard access and change detection (no Tauri dependency)
 crates/cled-sync/      Clipboard items and sync rules: loop prevention, deduplication
 crates/cled-lan/       Same-network sync: discovery, pairing, encrypted connections
+apps/relay/            Relay server for sync across networks (early development, not in use yet)
 docs/                  Architecture and design documents
 ```
 
@@ -54,6 +55,7 @@ pnpm install        # install JS dependencies
 pnpm dev            # run the desktop app with hot reload
 pnpm build          # build a release bundle
 pnpm check          # lint (Biome) + typecheck (tsc)
+pnpm relay          # run the relay server locally (see apps/relay/README.md)
 cargo fmt --all     # format Rust
 cargo clippy --workspace --all-targets
 cargo test --workspace

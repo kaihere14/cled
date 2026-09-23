@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "pnpm --filter cled-desktop tauri dev",
     "build": "pnpm --filter cled-desktop tauri build",
-    "check": "biome check . && pnpm --filter cled-desktop typecheck",
+    "relay": "pnpm --filter cled-relay dev",
+    "check": "biome check . && pnpm -r typecheck",
     "format": "biome format --write .",
     "prepare": "husky"
   },

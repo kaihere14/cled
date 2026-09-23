@@ -36,6 +36,7 @@ These are the same checks CI runs. Run them before opening a pull request:
 
 ```sh
 pnpm check                                               # Biome lint/format check + TypeScript
+pnpm --filter cled-relay test                            # relay tests
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -81,6 +82,7 @@ crates/cled-sync/       Clipboard items and sync rules
 crates/cled-lan/        Same-network discovery, pairing, and encrypted connections
 apps/desktop/src-tauri/ Tauri app: commands, events, tray, glue between the crates
 apps/desktop/src/       React + TypeScript + Tailwind UI
+apps/relay/             Relay server (Node.js + TypeScript + Fastify), early development
 docs/                   Architecture, RFCs, and platform spikes
 ```
 
@@ -98,6 +100,10 @@ Where things belong:
 - **`apps/desktop/src`** only renders state and calls Tauri commands. The UI never touches the
   clipboard or network directly. Command and event types in `src/lib/ipc.ts` mirror the Rust
   side and are kept in sync by hand.
+- **`apps/relay`** is a standalone server that runs on a VPS, not inside the desktop app. It
+  routes opaque encrypted payloads and never sees plaintext. Its code is grouped by feature under
+  `src/features/`; see [apps/relay/README.md](apps/relay/README.md). It needs only Node.js, not
+  Rust or Tauri.
 
 Read [docs/architecture.md](docs/architecture.md) before larger changes, and
 [docs/rfcs/0001-lan-sync.md](docs/rfcs/0001-lan-sync.md) before touching networking.
