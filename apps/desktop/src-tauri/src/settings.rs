@@ -16,7 +16,7 @@ use crate::relay::RelayState;
 const FILE_NAME: &str = "settings.json";
 
 /// The local relay started by `pnpm relay` (see `apps/relay/src/config.ts`).
-pub const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:8787";
+pub const DEFAULT_RELAY_URL: &str = "https://cled-92hd.onrender.com";
 
 /// Mirrors `Settings` in `src/lib/ipc.ts`. Missing fields take their defaults, so files written
 /// by older versions (or no file at all) load without migration.

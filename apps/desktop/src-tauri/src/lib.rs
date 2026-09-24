@@ -33,7 +33,7 @@ pub fn run() {
             );
             app.manage(clipboard);
             let settings = settings::SettingsState::load(app.handle());
-            let auth = auth::AuthState::load();
+            let auth = auth::AuthState::load(app.handle());
             let relay = relay::RelayState::start(
                 app.handle(),
                 device,

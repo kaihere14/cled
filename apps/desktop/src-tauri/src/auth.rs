@@ -6,11 +6,15 @@
 //! system browser shows Clerk's sign-in page, and Clerk redirects back to a one-off listener on
 //! `127.0.0.1` (one of `LOOPBACK_PORTS`). The app never sees the user's password, and there's no client secret to protect.
 //!
-//! The refresh token (long-lived) is kept in the OS credential store (Keychain, Credential
-//! Manager, Secret Service). Access tokens (short-lived) are only ever in memory. Tokens are never
-//! logged or sent to the UI.
+//! The refresh token (long-lived) is kept in a file in the app's config directory, readable only by
+//! the current user, like the sync identity key. Not the OS credential store: that makes macOS ask
+//! for the login password whenever the app's code signature changes. Access tokens (short-lived)
+//! are only ever in memory. Tokens are never logged or sent to the UI.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -19,7 +23,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -31,9 +35,8 @@ use crate::settings::SettingsState;
 /// Emitted with the new `AuthStatus` whenever it changes.
 const CHANGED_EVENT: &str = "auth:changed";
 
-/// Credential store entry holding the saved sign-in (`StoredSession` as JSON).
-const KEYRING_SERVICE: &str = "dev.cled.desktop";
-const KEYRING_ACCOUNT: &str = "relay-session";
+/// File in the app's config directory holding the saved sign-in (`StoredSession` as JSON).
+const SESSION_FILE: &str = "session.json";
 
 /// Local ports the sign-in redirect can come back to, tried in order. Clerk only redirects to
 /// registered URLs and compares the port too, so each one must be registered on the OAuth
@@ -76,7 +79,7 @@ pub enum TokenError {
     Unavailable(String),
 }
 
-/// What's saved in the credential store: enough to get new access tokens after a restart.
+/// What's saved to disk: enough to get new access tokens after a restart.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSession {
@@ -90,7 +93,7 @@ struct StoredSession {
 
 struct Session {
     stored: StoredSession,
-    /// `None` until the first refresh after loading from the credential store.
+    /// `None` until the first refresh after loading from disk.
     access_token: Option<(String, Instant)>,
 }
 
@@ -104,14 +107,24 @@ pub struct AuthState {
     /// Bumped by each sign-in attempt and sign-out, so a superseded attempt doesn't publish its
     /// outcome over a newer one's.
     generation: AtomicU64,
+    /// Where the sign-in is saved; `None` without a config directory, in which case a sign-in
+    /// lasts until the app quits.
+    session_path: Option<PathBuf>,
 }
 
 impl AuthState {
-    /// Loads a saved sign-in from the credential store, if there is one.
-    pub fn load() -> Arc<Self> {
-        let stored = keyring_entry()
-            .and_then(|entry| entry.get_password().map_err(|err| err.to_string()))
-            .ok()
+    /// Loads a saved sign-in from the config directory, if there is one.
+    pub fn load<R: Runtime>(app: &AppHandle<R>) -> Arc<Self> {
+        let session_path = match app.path().app_config_dir() {
+            Ok(dir) => Some(dir.join(SESSION_FILE)),
+            Err(err) => {
+                eprintln!("no config directory; sign-ins won't be remembered: {err}");
+                None
+            }
+        };
+        let stored = session_path
+            .as_deref()
+            .and_then(|path| fs::read_to_string(path).ok())
             .and_then(|json| serde_json::from_str::<StoredSession>(&json).ok());
         let status = match &stored {
             Some(stored) => AuthStatus::SignedIn {
@@ -132,6 +145,7 @@ impl AuthState {
             status: Mutex::new(status),
             cancel_sign_in: Mutex::new(None),
             generation: AtomicU64::new(0),
+            session_path,
         })
     }
 
@@ -141,6 +155,28 @@ impl AuthState {
 
     pub fn is_signed_in(&self) -> bool {
         matches!(self.status(), AuthStatus::SignedIn { .. })
+    }
+
+    fn store_session(&self, session: &StoredSession) {
+        let Some(path) = &self.session_path else {
+            return;
+        };
+        let json = serde_json::to_string(session).expect("session serializes");
+        if let Err(err) = write_private(path, json.as_bytes()) {
+            // The sign-in still works until the app quits; it just won't be remembered.
+            eprintln!("could not save the sign-in to {}: {err}", path.display());
+        }
+    }
+
+    fn forget_stored_session(&self) {
+        let Some(path) = &self.session_path else {
+            return;
+        };
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => eprintln!("could not remove the saved sign-in: {err}"),
+        }
     }
 
     /// A valid access token, refreshed first if it's about to expire.
@@ -172,7 +208,7 @@ impl AuthState {
             eprintln!("refreshing the sign-in failed with HTTP {status}; signing out");
             *guard = None;
             drop(guard);
-            forget_stored_session().await;
+            self.forget_stored_session();
             self.set_status(AuthStatus::SignedOut);
             return Err(TokenError::SignedOut);
         }
@@ -192,7 +228,7 @@ impl AuthState {
             && refresh_token != session.stored.refresh_token
         {
             session.stored.refresh_token = refresh_token;
-            store_session(&session.stored).await;
+            self.store_session(&session.stored);
         }
         Ok(token)
     }
@@ -227,39 +263,20 @@ fn expiry(expires_in: Option<u64>) -> Instant {
     Instant::now() + Duration::from_secs(expires_in.unwrap_or(120))
 }
 
-fn keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|err| err.to_string())
-}
-
-// Credential store calls block (and may talk to a system service), so they run on a blocking
-// thread rather than the async runtime.
-
-async fn store_session(session: &StoredSession) {
-    let json = serde_json::to_string(session).expect("session serializes");
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        keyring_entry().and_then(|entry| entry.set_password(&json).map_err(|e| e.to_string()))
-    })
-    .await
-    .unwrap_or_else(|err| Err(err.to_string()));
-    if let Err(err) = result {
-        // The sign-in still works until the app quits; it just won't be remembered.
-        eprintln!("could not save the sign-in to the credential store: {err}");
+/// Writes `bytes` to `path`, readable only by the current user on Unix (on Windows the file lives
+/// in the user's own profile).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
     }
-}
-
-async fn forget_stored_session() {
-    let result = tauri::async_runtime::spawn_blocking(|| {
-        match keyring_entry().map(|entry| entry.delete_credential()) {
-            Ok(Ok(()) | Err(keyring::Error::NoEntry)) => Ok(()),
-            Ok(Err(err)) => Err(err.to_string()),
-            Err(err) => Err(err),
-        }
-    })
-    .await
-    .unwrap_or_else(|err| Err(err.to_string()));
-    if let Err(err) = result {
-        eprintln!("could not remove the saved sign-in: {err}");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    options.open(path)?.write_all(bytes)
 }
 
 fn describe_http_error(err: &reqwest::Error) -> String {
@@ -432,7 +449,7 @@ async fn sign_in_flow<R: Runtime>(
         refresh_token,
         account: account.clone(),
     };
-    store_session(&stored).await;
+    auth.store_session(&stored);
     *auth.session.lock().await = Some(Session {
         stored,
         access_token: Some((tokens.access_token, expiry(tokens.expires_in))),
@@ -629,7 +646,7 @@ pub fn cancel_sign_in(auth: State<'_, Arc<AuthState>>) {
 }
 
 /// Signs out: disconnects from the relay, revokes the refresh token with the account service
-/// (best effort), and removes it from the credential store.
+/// (best effort), and removes it from disk.
 #[tauri::command]
 pub async fn sign_out(
     app: AppHandle,
@@ -639,7 +656,7 @@ pub async fn sign_out(
     auth.cancel_pending_sign_in();
     auth.generation.fetch_add(1, Ordering::SeqCst);
     let session = auth.session.lock().await.take();
-    forget_stored_session().await;
+    auth.forget_stored_session();
     publish(&app, &auth, &relay, AuthStatus::SignedOut);
 
     if let Some(Session { stored, .. }) = session
