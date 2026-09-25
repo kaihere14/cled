@@ -266,6 +266,98 @@ fn reconnects_after_a_device_restarts() {
     });
 }
 
+fn knows(node: &TestNode, peer: DeviceId) -> bool {
+    node.node.peers().iter().any(|p| p.device_id == peer)
+}
+
+fn restart(node: TestNode) -> TestNode {
+    let TestNode {
+        node, config, _dir, ..
+    } = node;
+    drop(node);
+    start(config, _dir)
+}
+
+#[test]
+fn a_device_paired_with_one_member_is_trusted_by_the_whole_group() {
+    let desk = new_node("desk");
+    let laptop = new_node("laptop");
+    pair(&desk, &laptop);
+
+    // Only the desk sees the code; the laptop never pairs with the new device itself.
+    let guest = new_node("guest");
+    pair(&desk, &guest);
+    wait_until("laptop and guest connect", || {
+        online(&laptop, guest.config.device_id) && online(&guest, laptop.config.device_id)
+    });
+
+    let mut engine = SyncEngine::new(guest.config.device_id);
+    guest.node.broadcast(copied(&mut engine, "from guest"));
+    let (got, from) = wait_for_event(&laptop, |event| match event {
+        Event::ItemReceived { item, from } => Some((item, from)),
+        _ => None,
+    });
+    assert_eq!(from, guest.config.device_id);
+    assert_eq!(got.content, ClipboardContent::text("from guest"));
+}
+
+#[test]
+fn a_member_offline_during_pairing_learns_the_new_device_later() {
+    let desk = new_node("desk");
+    let laptop = new_node("laptop");
+    pair(&desk, &laptop);
+
+    let TestNode {
+        node, config, _dir, ..
+    } = laptop;
+    drop(node);
+    wait_until("desk notices laptop left", || {
+        !online(&desk, config.device_id)
+    });
+
+    let guest = new_node("guest");
+    pair(&desk, &guest);
+    wait_until("guest learns the offline laptop", || {
+        knows(&guest, config.device_id)
+    });
+
+    let laptop = start(config, _dir);
+    wait_until("laptop and guest connect", || {
+        online(&laptop, guest.config.device_id) && online(&guest, laptop.config.device_id)
+    });
+}
+
+#[test]
+fn removal_on_one_device_removes_from_the_whole_group() {
+    let desk = new_node("desk");
+    let laptop = new_node("laptop");
+    let guest = new_node("guest");
+    pair(&desk, &laptop);
+    pair(&desk, &guest);
+    wait_until("group connected", || {
+        online(&laptop, guest.config.device_id) && online(&guest, laptop.config.device_id)
+    });
+
+    desk.node.remove_peer(guest.config.device_id).unwrap();
+    let by = wait_for_event(&guest, |event| match event {
+        Event::RemovedBy { device_id, .. } => Some(device_id),
+        _ => None,
+    });
+    assert_eq!(by, desk.config.device_id);
+    wait_until("laptop drops guest", || {
+        !knows(&laptop, guest.config.device_id)
+    });
+    wait_until("guest forgets the group", || guest.node.peers().is_empty());
+    assert!(online(&laptop, desk.config.device_id));
+
+    // Restarting doesn't bring it back: the laptop still refuses it.
+    let laptop = restart(laptop);
+    wait_until("laptop reconnects to desk", || {
+        online(&laptop, desk.config.device_id)
+    });
+    assert!(!knows(&laptop, guest.config.device_id));
+}
+
 #[test]
 fn a_device_listening_on_all_interfaces_accepts_ipv6() {
     // Like the app: listening on every interface. Devices are often discovered by an IPv6

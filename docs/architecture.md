@@ -221,8 +221,8 @@ The design, security model, and wire format are in
 | `node` | `LanNode`: runs on its own small Tokio runtime. Accepts and dials connections, runs pairing, keeps one connection per paired device, sends items, and reports `Event`s on a channel. Its methods block briefly and can be called from any thread. |
 | `noise` | Noise handshakes and the encrypted channel (chunked messages, length-checked before allocation). Works over any ordered byte stream. |
 | `discovery` | mDNS announce/browse. The device name is announced only while pairing. |
-| `wire` | Message types and postcard encoding. Images travel as PNG and are decoded with a memory limit. |
-| `peers` | `peers.json`: paired devices and recently removed ones, written atomically |
+| `wire` | Message types and postcard encoding. Images travel as PNG and are decoded with a memory limit. A `Roster` carries a device's view of the group. |
+| `peers` | `peers.json`: the group's paired devices and removals, written atomically, and merging of rosters from other members (the newer of joining or removal wins) |
 | `keys` | The device's X25519 key pair in `identity.key` (mode 0600 on Unix) |
 | `code` | 8-character Crockford base32 pairing codes |
 
@@ -244,6 +244,8 @@ and the network:
   - an impostor with a paired device's ID but not its key
   - removal notices
   - reconnection after restart
+  - groups: a device paired with one member connects to the others, a member that was offline
+    catches up, and a removal on one device removes it everywhere
 - `tests/tunnel.rs`: sessions over a tunnel through a stand-in relay that only copies bytes: items
   and images both ways, no plaintext in anything it forwards, a tampered byte ends the session
   without delivering the item, a relay can't impersonate a paired device, reconnection.

@@ -1,6 +1,7 @@
 //! Messages exchanged between paired devices, and their binary encoding (postcard).
 
 use std::io::Cursor;
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cled_clipboard::{ClipboardContent, Image, MAX_IMAGE_BYTES};
@@ -22,6 +23,10 @@ pub(crate) enum Message {
     Item(WireItem),
     Ping,
     Bye(ByeReason),
+    /// The sender's paired devices and removals, so every device in a group trusts the same
+    /// devices. Sent when a session starts and whenever the sender's list changes. Added after
+    /// the others so older versions only log it as malformed.
+    Roster(Roster),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +44,31 @@ pub(crate) struct Hello {
 pub(crate) enum ByeReason {
     /// The sender removed this device from its paired devices.
     Unpaired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) struct Roster {
+    pub members: Vec<RosterPeer>,
+    pub removed: Vec<RosterRemoval>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RosterPeer {
+    pub device_id: [u8; 16],
+    pub name: String,
+    pub public_key: [u8; 32],
+    /// When the device joined the group, as first recorded by the device that paired it.
+    pub paired_at_ms: u64,
+    /// Where the sender last reached it; a hint for when discovery doesn't find it. Never a
+    /// scoped (link-local) IPv6 address: its scope names an interface on the sender.
+    pub address: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RosterRemoval {
+    /// With its key, so any device in the group can authenticate it and tell it.
+    pub peer: RosterPeer,
+    pub removed_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +242,28 @@ mod tests {
         let item = local_item(ClipboardContent::text(&"x".repeat(MAX_MESSAGE_BYTES + 1)));
         let message = Message::Item(WireItem::from_item(&item).unwrap());
         assert!(matches!(message.encode(), Err(LanError::TooLarge(_))));
+    }
+
+    #[test]
+    fn roster_round_trips() {
+        let peer = RosterPeer {
+            device_id: [1; 16],
+            name: "laptop".into(),
+            public_key: [2; 32],
+            paired_at_ms: 3,
+            address: Some("[2001:db8::1]:4000".parse().unwrap()),
+        };
+        let message = Message::Roster(Roster {
+            members: vec![peer.clone()],
+            removed: vec![RosterRemoval {
+                peer,
+                removed_at_ms: 4,
+            }],
+        });
+        assert_eq!(
+            Message::decode(&message.encode().unwrap()).unwrap(),
+            message
+        );
     }
 
     #[test]

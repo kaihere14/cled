@@ -18,7 +18,7 @@ use crate::discovery::Discovery;
 use crate::keys::Keys;
 use crate::noise::{Cipher, pairing_handshake, session_handshake};
 use crate::peers::{Peer, PeerStore};
-use crate::wire::{ByeReason, Hello, Message, PROTOCOL_VERSION, WireItem, now_ms};
+use crate::wire::{ByeReason, Hello, Message, PROTOCOL_VERSION, Roster, WireItem, now_ms};
 use crate::{LanError, Result};
 
 const MAGIC: &[u8; 4] = b"CLED";
@@ -110,7 +110,8 @@ pub enum Event {
     /// Too many wrong attempts or expiry: a new code replaced the shown one (`None`: pairing
     /// ended because the code expired).
     PairingCodeChanged(Option<PairingCode>),
-    /// Another device removed this one. It has been forgotten here too.
+    /// Another device removed this one from the group. Every paired device has been forgotten
+    /// here.
     RemovedBy { device_id: DeviceId, name: String },
     /// A paired device's clock differs from ours by more than a few seconds.
     ClockSkew { device_id: DeviceId, skew_ms: u64 },
@@ -292,7 +293,8 @@ impl LanNode {
         self.block_on(async move { inner.join_pairing(addresses, code).await })
     }
 
-    /// Forgets a paired device. If it's online, it's told first so it forgets this one too.
+    /// Removes a device from the group: every paired device forgets it. If it's online, it's
+    /// told first so it leaves the group too.
     pub fn remove_peer(&self, device_id: DeviceId) -> Result<()> {
         let inner = Arc::clone(&self.inner);
         self.block_on(async move { inner.remove_peer(device_id).await })
@@ -596,6 +598,7 @@ impl Inner {
                 self.end_pairing().await;
                 let name = hello.name.clone();
                 self.store_peer(joiner, hello, public_key, peer_addr)?;
+                self.send_roster_to_all();
                 self.emit(Event::Paired {
                     device_id: joiner,
                     name,
@@ -667,6 +670,7 @@ impl Inner {
 
         let name = hello.name.clone();
         self.store_peer(listener, hello, public_key, address)?;
+        self.send_roster_to_all();
         self.emit(Event::PeersChanged);
         self.trigger_dial(listener);
         Ok(PeerStatus {
@@ -758,16 +762,100 @@ impl Inner {
     // ---- Removal ----
 
     async fn remove_peer(&self, id: DeviceId) -> Result<()> {
-        if let Some(conn) = lock(&self.conns).remove(&id) {
-            let bye = Message::Bye(ByeReason::Unpaired).encode()?;
+        self.disconnect_removed(id);
+        // Remembered with its key, so it's told about the removal if it reconnects (e.g. it was
+        // offline, or the notice above was lost), and so the rest of the group hears of it.
+        lock(&self.peers).remove(id, now_ms())?;
+        self.send_roster_to_all();
+        self.emit(Event::PeersChanged);
+        Ok(())
+    }
+
+    /// Tells a connected device it was removed, then closes the connection.
+    fn disconnect_removed(&self, id: DeviceId) {
+        if let Some(conn) = lock(&self.conns).remove(&id)
+            && let Ok(bye) = Message::Bye(ByeReason::Unpaired).encode()
+        {
             let _ = conn.outgoing.send(Outgoing::Last(Arc::new(bye)));
         }
         lock(&self.backoff).remove(&id);
-        // Remembered with its key, so it's told about the removal if it reconnects (e.g. it was
-        // offline, or the notice above was lost).
-        lock(&self.peers).remove(id, true)?;
+    }
+
+    // ---- The group ----
+
+    fn roster_message(&self) -> Option<Arc<Vec<u8>>> {
+        let roster = lock(&self.peers).roster();
+        match Message::Roster(roster).encode() {
+            Ok(bytes) => Some(Arc::new(bytes)),
+            Err(err) => {
+                log::warn!("not sending the device list: {err}");
+                None
+            }
+        }
+    }
+
+    fn send_roster_to_all(&self) {
+        if let Some(bytes) = self.roster_message() {
+            self.send_to_all(bytes);
+        }
+    }
+
+    fn send_roster_to(&self, peer: DeviceId) {
+        if let Some(bytes) = self.roster_message()
+            && let Some(conn) = lock(&self.conns).get(&peer)
+        {
+            let _ = conn.outgoing.send(Outgoing::Message(bytes));
+        }
+    }
+
+    /// Takes in the group as paired device `from` sees it: connects to devices it paired and
+    /// drops devices it removed, then passes any news on to the rest of the group.
+    fn apply_roster(self: &Arc<Self>, from: DeviceId, roster: Roster) {
+        let change = match lock(&self.peers).merge(self.config.device_id, from, roster) {
+            Ok(change) => change,
+            Err(err) => {
+                log::warn!("could not update paired devices: {err}");
+                return;
+            }
+        };
+        if change.is_empty() {
+            return;
+        }
+        for &id in &change.removed {
+            self.disconnect_removed(id);
+        }
+        for &id in &change.added {
+            // A new key: a session with the old one must not continue.
+            if let Some(conn) = lock(&self.conns).remove(&id) {
+                let _ = conn.outgoing.send(Outgoing::Close);
+            }
+            self.trigger_dial(id);
+        }
+        self.send_roster_to_all();
         self.emit(Event::PeersChanged);
-        Ok(())
+    }
+
+    /// Paired device `by` removed this device from the group: forget the whole group and close
+    /// every session. Nothing is sent, so the group keeps its other members.
+    fn leave_group(&self, by: DeviceId) {
+        let name = {
+            let mut peers = lock(&self.peers);
+            let Some(name) = peers.get(by).map(|p| p.name.clone()) else {
+                return;
+            };
+            if let Err(err) = peers.clear() {
+                log::warn!("could not forget paired devices: {err}");
+            }
+            name
+        };
+        for (_, conn) in lock(&self.conns).drain() {
+            let _ = conn.outgoing.send(Outgoing::Close);
+        }
+        lock(&self.backoff).clear();
+        self.emit(Event::RemovedBy {
+            device_id: by,
+            name,
+        });
     }
 
     // ---- Sessions ----
@@ -899,7 +987,7 @@ impl Inner {
             let bye = Message::Bye(ByeReason::Unpaired).encode()?;
             cipher.send(&mut writer, &bye).await?;
             let _ = writer.shutdown().await;
-            lock(&self.peers).forget_removed(initiator)?;
+            lock(&self.peers).mark_notified(initiator)?;
             return Ok(());
         }
         let address = peer_addr.map(|address| with_port(address, hello.listen_port));
@@ -941,6 +1029,7 @@ impl Inner {
         ) {
             return; // A preferred connection to this peer already exists.
         }
+        self.send_roster_to(peer);
         self.emit(Event::PeersChanged);
 
         let inner = Arc::clone(&self);
@@ -953,7 +1042,7 @@ impl Inner {
         });
     }
 
-    async fn read_loop(&self, peer: DeviceId, cipher: &Cipher, mut reader: Reader) {
+    async fn read_loop(self: &Arc<Self>, peer: DeviceId, cipher: &Cipher, mut reader: Reader) {
         loop {
             let bytes = match tokio::time::timeout(IDLE_TIMEOUT, cipher.recv(&mut reader)).await {
                 Ok(Ok(bytes)) => bytes,
@@ -975,15 +1064,10 @@ impl Inner {
                     }
                 }
                 Ok(Message::Bye(ByeReason::Unpaired)) => {
-                    let removed = lock(&self.peers).remove(peer, false).ok().flatten();
-                    if let Some(removed) = removed {
-                        self.emit(Event::RemovedBy {
-                            device_id: peer,
-                            name: removed.name,
-                        });
-                    }
+                    self.leave_group(peer);
                     return;
                 }
+                Ok(Message::Roster(roster)) => self.apply_roster(peer, roster),
                 Ok(Message::Ping | Message::Hello(_)) => {}
                 Err(err) => log::warn!("malformed message from {peer}: {err}"),
             }

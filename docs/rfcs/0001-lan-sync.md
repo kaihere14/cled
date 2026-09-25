@@ -95,15 +95,31 @@ Limits:
   guessing at 3 in 2^40 per code.
 - Pairing is always explicit. Nothing pairs automatically.
 
-**Removing a device** deletes it from `peers.json`, and its connections are refused from then on.
-If the removed device is online, it is told first (`Bye { reason: Unpaired }`). It then forgets
-the remover too and shows a system notification: "<name> removed this device".
+**Paired devices form a group.** Pairing a new device with any member adds it to the whole
+group, so it is paired once, not once per existing device. After every session handshake, and
+whenever its list changes, a device sends its paired devices a `Roster`: each member's device ID,
+name, static public key, paired-at time, and last direct address, plus the devices removed from the
+group with their keys and removal times. The receiver merges it: for each device, the newer of
+joining (paired-at) and removal wins, so rosters can arrive in any order, through any member,
+and still agree. A device that learns something new passes its roster on; a roster that changes
+nothing isn't forwarded, so the exchange stops. Rosters arrive only inside authenticated Noise
+`KK` sessions, so a relay or anyone else on the network can't add a device. Any member can: that
+is the point of the group, and it means a compromised member can add devices too (see the threat
+model). A roster can't add or remove its receiver or its sender.
 
-The remover also keeps the removed device's key in a short `removed` list in `peers.json` (last
-20). If that device connects later (it was offline, or the first notice was lost), it is
-authenticated with its old key, told it was removed, and then forgotten for good. An
-unauthenticated "you were removed" signal would let anyone on the network make devices forget
-each other, so none is ever sent.
+**Removing a device** removes it from the whole group: the remover deletes it from `peers.json`,
+records the removal, and its roster tells every other member, which drop it too. Its connections
+are refused from then on. If the removed device is online, it is told (`Bye { reason: Unpaired }`)
+by each member it's connected to. It then leaves the group, forgetting every paired device
+without recording removals (which would otherwise spread to the rest of the group), and shows a
+system notification: "<name> removed this device".
+
+Removals are kept, with the removed device's key, in a `removed` list in `peers.json` (last 100),
+so a roster from a member that hasn't heard can't add the device back. If the removed device
+connects later (it was offline, or the notice was lost), any member that knows of the removal
+authenticates it with its old key and tells it once. An unauthenticated "you were removed"
+signal would let anyone on the network make devices forget each other, so none is ever sent.
+Pairing the device again later is newer than its removal, so it rejoins.
 
 Libraries: `spake2` 0.4 (RustCrypto) and `snow` 0.10 (Noise).
 
@@ -169,7 +185,8 @@ Bye   { reason }
 | Man-in-the-middle during pairing | SPAKE2: the attacker doesn't know the code, so the derived keys don't match and pairing fails |
 | Guessing the pairing code | 40-bit code, 3 attempts, 2-minute lifetime |
 | Passive observers learning device names | Names advertised only during pairing |
-| Stolen device | Remove it on the other devices. Its key is then refused. |
+| Stolen device | Remove it on any other device; the whole group then refuses its key. |
+| A compromised member adds devices | Accepted: any member can add a device to the group. Remove the member and anything it added. |
 | Replay of old messages | Noise transport nonces, plus M5 deduplication by item ID |
 | Malicious oversized messages | 16 MiB limit checked before allocation |
 
