@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import { DownloadButton } from "./_components/download-button";
 import { ChevronIcon, GitHubIcon, LockIcon } from "./_components/icons";
 import { FadeIn, MotionProvider, Stagger, StaggerItem } from "./_components/motion";
 import { SyncDemo } from "./_components/sync-demo";
@@ -53,7 +54,8 @@ export default function Home() {
           </a>
         </StaggerItem>
 
-        <StaggerItem>
+        {/* Transforms make each item its own stacking context; lift the ones with menus. */}
+        <StaggerItem className="relative z-30">
           <header className="border-b border-white/[0.06]">
             <nav className="mx-auto flex h-20 max-w-6xl items-center justify-between px-5 sm:px-8">
               <Link href="/" className="pressable flex items-center gap-2.5 rounded-lg">
@@ -86,12 +88,7 @@ export default function Home() {
                   <GitHubIcon className="size-4" />
                   GitHub
                 </a>
-                <a
-                  href={BUILDING_URL}
-                  className="pressable flex h-10 items-center rounded-full bg-indigo-500 px-5 text-[15px] font-medium hover:bg-indigo-400"
-                >
-                  Get Cled
-                </a>
+                <DownloadButton variant="nav" />
               </div>
             </nav>
           </header>
@@ -115,13 +112,8 @@ export default function Home() {
           </StaggerItem>
 
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
-            <StaggerItem blur={false}>
-              <a
-                href={BUILDING_URL}
-                className="pressable flex h-12 items-center rounded-full bg-white px-6 text-[15px] font-medium text-indigo-700 shadow-[0_8px_24px_-8px_rgb(20_10_90/0.6)] hover:bg-indigo-50"
-              >
-                Get Cled
-              </a>
+            <StaggerItem blur={false} className="relative z-20">
+              <DownloadButton variant="hero" />
             </StaggerItem>
             <StaggerItem blur={false}>
               <a
